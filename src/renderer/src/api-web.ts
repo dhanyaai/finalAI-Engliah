@@ -3,14 +3,18 @@
  * running as a plain web app (e.g. on Replit).
  *
  * Audio:  browser SpeechRecognition (STT) + SpeechSynthesis (TTS)
- * LLM:    SSE stream from the Express backend at /api/chat
+ * LLM:    SSE stream from the Vite backend at /api/chat (see src/web/chat-plugin.ts)
  * Config: REST calls to /api/config
+ *
+ * This module is a no-op inside Electron (window.api is already provided by
+ * the preload bridge). The macOS audio flow is entirely untouched.
  */
 
 // ─── Types (mirror preload/index.ts) ─────────────────────────────────────────
 
 type KittenState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted'
 type Unsubscribe = () => void
+type Listener<T> = (data: T) => void
 
 interface ConfigData {
   aiName: string
@@ -24,6 +28,20 @@ interface DownloadProgress {
   bytes: number
   total: number
   currentFile: string
+}
+
+// ─── isWebChatMode helper (used by UI components) ────────────────────────────
+
+/**
+ * Returns true when the app is running in web-mode (window.api is the web
+ * adapter, not the Electron preload bridge). Safe to call before the adapter
+ * has finished initialising.
+ */
+export function isWebChatMode(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    (window as { __HIKID_WEB_CHAT__?: boolean }).__HIKID_WEB_CHAT__ === true
+  )
 }
 
 // ─── Event bus ───────────────────────────────────────────────────────────────
@@ -109,26 +127,43 @@ function stopTts(): void {
 // ─── LLM chat ─────────────────────────────────────────────────────────────────
 
 let chatAbort: AbortController | null = null
+// Full conversation history so the LLM has context
+const chatHistory: Array<{ role: 'user' | 'assistant'; text: string }> = []
 
 async function sendMessage(text: string): Promise<void> {
-  stopTts()
+  const trimmed = text.trim()
+  if (!trimmed) return
 
+  stopTts()
   emit('kittenState', 'thinking')
   emit('llmDelta', { text: '' }) // clear previous delta in UI
 
+  chatHistory.push({ role: 'user', text: trimmed })
+  emit('transcription', { text: trimmed })
+
   chatAbort = new AbortController()
 
+  let assistantText = ''
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ messages: chatHistory }),
       signal: chatAbort.signal
     })
 
     if (!res.ok || !res.body) {
-      emit('error', { message: `Backend error: ${res.status} ${res.statusText}` })
+      let message = `Backend error: ${res.status} ${res.statusText}`
+      try {
+        const body = (await res.json()) as { error?: string }
+        if (body.error) message = body.error
+      } catch {
+        // keep generic message
+      }
+      emit('error', { message })
       emit('kittenState', 'idle')
+      // Remove the user message we added since it didn't go through
+      chatHistory.pop()
       return
     }
 
@@ -156,10 +191,14 @@ async function sendMessage(text: string): Promise<void> {
           if (evt.type === 'thinking') {
             emit('kittenState', 'thinking')
           } else if (evt.type === 'delta' && evt.text) {
+            assistantText += evt.text
             emit('llmDelta', { text: evt.text })
           } else if (evt.type === 'sentence' && evt.text) {
             enqueueTts(evt.text)
           } else if (evt.type === 'done') {
+            if (assistantText) {
+              chatHistory.push({ role: 'assistant', text: assistantText })
+            }
             if (pendingTtsCount === 0) emit('kittenState', 'idle')
           } else if (evt.type === 'interrupted') {
             emit('kittenState', 'interrupted')
@@ -168,6 +207,8 @@ async function sendMessage(text: string): Promise<void> {
           } else if (evt.type === 'error') {
             emit('error', { message: evt.message ?? 'Unknown error' })
             emit('kittenState', 'idle')
+            // Remove the user message we added since it failed
+            chatHistory.pop()
           }
         } catch {
           // malformed SSE line
@@ -182,6 +223,8 @@ async function sendMessage(text: string): Promise<void> {
       const message = err instanceof Error ? err.message : String(err)
       emit('error', { message })
       emit('kittenState', 'idle')
+      // Remove the user message we added since it failed
+      chatHistory.pop()
     }
   }
 }
@@ -318,6 +361,7 @@ function interrupt(): Promise<void> {
 async function resetConversation(): Promise<void> {
   chatAbort?.abort()
   stopTts()
+  chatHistory.length = 0
   await fetch('/api/reset', { method: 'POST' }).catch(() => {})
   emit('kittenState', 'idle')
 }
@@ -383,6 +427,7 @@ const webApi = {
 
 // Only inject if not already provided by Electron preload
 if (typeof window !== 'undefined' && !('api' in window)) {
+  ;(window as { __HIKID_WEB_CHAT__?: boolean }).__HIKID_WEB_CHAT__ = true
   ;(window as unknown as { api: typeof webApi }).api = webApi
 }
 

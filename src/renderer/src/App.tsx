@@ -8,6 +8,8 @@ import DownloadScreen from '@renderer/components/DownloadScreen'
 import DepsSetupScreen from '@renderer/components/DepsSetupScreen'
 import OnboardingScreen from '@renderer/components/OnboardingScreen'
 import IdeasMenu from '@renderer/components/IdeasMenu'
+import ChatInput from '@renderer/components/ChatInput'
+import { isWebChatMode } from '@renderer/api-web'
 import { useConversation } from '@renderer/hooks/useConversation'
 import { useConfig } from '@renderer/hooks/useConfig'
 import { t, detectedLocale } from '@shared/i18n'
@@ -32,9 +34,13 @@ const ONBOARDED_KEY = 'hikid-onboarded'
 function loadTextEnabled(): boolean {
   try {
     const saved = localStorage.getItem(TEXT_ENABLED_KEY)
+    if (saved === null) {
+      // In web mode chat is text-based, so show the transcript by default
+      return isWebChatMode()
+    }
     return saved === 'true'
   } catch {
-    return false
+    return isWebChatMode()
   }
 }
 
@@ -275,7 +281,15 @@ function App(): React.JSX.Element {
     }
   }
 
-  const showVoiceButton = mode === 'press-and-hold'
+  const webChat = isWebChatMode()
+
+  const handleSendText = (text: string): void => {
+    window.api.sendMessage(text).catch((err: unknown) => {
+      console.error('Send message error:', err)
+    })
+  }
+
+  const showVoiceButton = !webChat && mode === 'press-and-hold'
 
   const showSidebar = screen === 'conversation' && textEnabled
 
@@ -390,7 +404,18 @@ function App(): React.JSX.Element {
               )}
 
               <div className="mic-area">
-                {showVoiceButton ? (
+                {webChat ? (
+                  <>
+                    {(isProcessing || kittenState === 'thinking') && (
+                      <span className="thinking-spinner" aria-hidden="true" />
+                    )}
+                    <ChatInput
+                      disabled={!servicesReady || isProcessing || kittenState === 'thinking'}
+                      onSend={handleSendText}
+                      placeholder={`Say something to ${aiName}…`}
+                    />
+                  </>
+                ) : showVoiceButton ? (
                   <>
                     <VoiceButton
                       isRecording={isRecording}

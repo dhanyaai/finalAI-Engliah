@@ -5,10 +5,18 @@
 import { resolve } from 'path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { webChatPlugin } from './src/web/chat-plugin'
+
+// Web chat mode is on by default for the standalone web build.
+// Set WEB_CHAT=false to fall back to the old no-op stubs.
+const webChatEnabled = process.env.WEB_CHAT !== 'false'
 
 export default defineConfig({
   root: 'src/renderer',
-  plugins: [react()],
+  plugins: [react(), ...(webChatEnabled ? [webChatPlugin()] : [])],
+  define: {
+    'import.meta.env.VITE_WEB_CHAT': JSON.stringify(webChatEnabled ? 'true' : 'false')
+  },
   resolve: {
     alias: {
       '@renderer': resolve('src/renderer/src'),
