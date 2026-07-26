@@ -50,7 +50,9 @@ function getDefaultConfig(): AppConfig {
     version: 1,
     aiName: 'Kitten',
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
-    baseUrl: process.env.LLM_BASE_URL ?? (hasOpenAI ? 'https://api.openai.com/v1' : 'http://localhost:11434/v1'),
+    baseUrl:
+      process.env.LLM_BASE_URL ??
+      (hasOpenAI ? 'https://api.openai.com/v1' : 'http://localhost:11434/v1'),
     apiKey: process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY ?? 'ollama',
     modelName: process.env.LLM_MODEL ?? (hasOpenAI ? 'gpt-4o-mini' : 'qwen3:0.6b')
   }
@@ -132,11 +134,21 @@ app.post('/api/config', (req, res) => {
   const current = loadConfig()
   const updated: AppConfig = {
     version: current.version,
-    aiName: (typeof body.aiName === 'string' && body.aiName.trim()) ? body.aiName.trim() : current.aiName,
-    systemPrompt: (typeof body.systemPrompt === 'string' && body.systemPrompt) ? body.systemPrompt : current.systemPrompt,
-    baseUrl: (typeof body.baseUrl === 'string' && body.baseUrl.trim()) ? body.baseUrl.trim() : current.baseUrl,
+    aiName:
+      typeof body.aiName === 'string' && body.aiName.trim() ? body.aiName.trim() : current.aiName,
+    systemPrompt:
+      typeof body.systemPrompt === 'string' && body.systemPrompt
+        ? body.systemPrompt
+        : current.systemPrompt,
+    baseUrl:
+      typeof body.baseUrl === 'string' && body.baseUrl.trim()
+        ? body.baseUrl.trim()
+        : current.baseUrl,
     apiKey: typeof body.apiKey === 'string' ? body.apiKey : current.apiKey,
-    modelName: (typeof body.modelName === 'string' && body.modelName.trim()) ? body.modelName.trim() : current.modelName
+    modelName:
+      typeof body.modelName === 'string' && body.modelName.trim()
+        ? body.modelName.trim()
+        : current.modelName
   }
   saveConfig(updated)
   res.json(updated)

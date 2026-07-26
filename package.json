@@ -66,5 +66,7 @@
     "vite": "^7.2.6",
     "vitest": "^4.1.5"
   },
-  "overrides": {}
+  "overrides": {
+    "@eslint/config-array": "^0.23.5"
+  }
 }

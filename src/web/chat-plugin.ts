@@ -86,7 +86,8 @@ async function handleChat(req: Connect.IncomingMessage, res: ServerResponse): Pr
     return
   }
 
-  const aiName = typeof body.aiName === 'string' && body.aiName.trim() ? body.aiName.trim() : 'Kitten'
+  const aiName =
+    typeof body.aiName === 'string' && body.aiName.trim() ? body.aiName.trim() : 'Kitten'
   const systemPrompt = (
     typeof body.systemPrompt === 'string' && body.systemPrompt.trim()
       ? body.systemPrompt

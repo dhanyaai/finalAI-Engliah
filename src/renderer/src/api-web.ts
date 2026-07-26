@@ -406,22 +406,15 @@ const webApi = {
   getConfig,
   setConfig,
 
-  onServiceStatus: (cb: (s: { ready: boolean }) => void): Unsubscribe =>
-    on('serviceStatus', cb),
-  onKittenState: (cb: (s: KittenState) => void): Unsubscribe =>
-    on('kittenState', cb),
-  onTranscription: (cb: (d: { text: string }) => void): Unsubscribe =>
-    on('transcription', cb),
-  onLlmDelta: (cb: (d: { text: string }) => void): Unsubscribe =>
-    on('llmDelta', cb),
-  onTtsEvent: (cb: (e: 'start' | 'end') => void): Unsubscribe =>
-    on('ttsEvent', cb),
+  onServiceStatus: (cb: (s: { ready: boolean }) => void): Unsubscribe => on('serviceStatus', cb),
+  onKittenState: (cb: (s: KittenState) => void): Unsubscribe => on('kittenState', cb),
+  onTranscription: (cb: (d: { text: string }) => void): Unsubscribe => on('transcription', cb),
+  onLlmDelta: (cb: (d: { text: string }) => void): Unsubscribe => on('llmDelta', cb),
+  onTtsEvent: (cb: (e: 'start' | 'end') => void): Unsubscribe => on('ttsEvent', cb),
   onDownloadProgress: (cb: (d: DownloadProgress) => void): Unsubscribe =>
     on('downloadProgress', cb),
-  onError: (cb: (d: { message: string }) => void): Unsubscribe =>
-    on('error', cb),
-  onConfigChanged: (cb: (c: ConfigData) => void): Unsubscribe =>
-    on('configChanged', cb)
+  onError: (cb: (d: { message: string }) => void): Unsubscribe => on('error', cb),
+  onConfigChanged: (cb: (c: ConfigData) => void): Unsubscribe => on('configChanged', cb)
 }
 
 // Only inject if not already provided by Electron preload
