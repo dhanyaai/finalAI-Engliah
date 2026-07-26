@@ -1,8 +1,6 @@
 /**
  * Standalone Vite config for running the HiKid renderer as a plain web app.
- * This bypasses Electron entirely so the UI can be previewed on Replit.
- * All window.api calls are stubbed — the real audio/AI pipeline requires
- * the macOS desktop app (see README.md).
+ * Proxies /api to the Express backend on port 3000.
  */
 import { resolve } from 'path'
 import { defineConfig } from 'vite'
@@ -20,6 +18,12 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5000,
-    allowedHosts: true
+    allowedHosts: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true
+      }
+    }
   }
 })

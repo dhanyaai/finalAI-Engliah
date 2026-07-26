@@ -1,29 +1,53 @@
 # HiKid
 
-> AI English conversation companion for kids — Electron desktop app (macOS).
+> AI English conversation companion for kids — web-enabled build running on Replit.
 
 ## Project overview
 
-HiKid is an **Electron + React + TypeScript** desktop application. Kids speak into the microphone and a fully local AI pipeline (SoX → ASR → LLM → TTS) responds in English. All data stays on-device.
+HiKid is an **Electron + React + TypeScript** desktop application, adapted to run fully in the browser on Replit. Kids speak into the microphone and an AI responds in English, with both text and spoken audio.
 
-**Stack:** Electron 39, React 19, TypeScript, Vite (via electron-vite), Ollama (LLM), kitten-tts-server (TTS), Qwen3-ASR-0.6B (ASR).
+**Stack:** React 19, TypeScript, Vite, Express (web backend), OpenAI-compatible LLM API, browser SpeechRecognition (STT), browser SpeechSynthesis (TTS).
 
-## Running on Replit (web preview)
-
-Because Replit is Linux-based and Electron requires a macOS display + native audio tooling, the full desktop app cannot run here. Instead, the **renderer (React UI) is served as a standalone web app** via Vite:
+## Running on Replit
 
 ```
 npm run dev:web
 ```
 
-This starts a Vite dev server on port 5000. All `window.api` calls (Electron IPC) are stubbed with safe no-ops — the UI renders but audio/AI features are inactive.
+This starts two processes via `concurrently`:
+- **Express backend** (`server/index.ts`) on port 3000 — handles LLM streaming chat and config
+- **Vite dev server** (`vite.web.config.ts`) on port 5000 — serves the React UI, proxies `/api` to port 3000
 
-## Running the real app (macOS only)
+The `OPENAI_API_KEY` secret is automatically detected. The backend defaults to `gpt-4o-mini` via `https://api.openai.com/v1`. Both can be overridden in the app's Settings panel or via environment variables:
 
-1. Install system dependencies: `brew install sox espeak-ng`
-2. Install Ollama and run `ollama run qwen3:0.6b`
-3. `npm install`
-4. `npm run dev`  — starts Electron with hot-reload
+| Env var | Purpose | Default |
+|---|---|---|
+| `OPENAI_API_KEY` | API key (auto-detected) | — |
+| `LLM_BASE_URL` | Override base URL | `https://api.openai.com/v1` |
+| `LLM_API_KEY` | Override API key | `OPENAI_API_KEY` value |
+| `LLM_MODEL` | Override model name | `gpt-4o-mini` |
+
+## How it works (web mode)
+
+```
+User speaks → browser SpeechRecognition (STT)
+           → POST /api/chat (SSE stream)
+           → Express backend → OpenAI-compatible LLM
+           → sentence chunks streamed back
+           → browser SpeechSynthesis (TTS) speaks each sentence
+```
+
+- **Voice input**: Hold the mic button and speak (Chrome/Edge required for SpeechRecognition)
+- **Text chat**: Enable the text toggle (⊞) in the top-right to see the conversation transcript
+- **Settings**: Click the gear icon to change AI name, system prompt, or LLM endpoint
+
+## Running the original macOS desktop app
+
+The native Electron app uses local models (no cloud API needed):
+
+1. `brew install sox espeak-ng`
+2. Install Ollama → `ollama run qwen3:0.6b`
+3. `npm install && npm run dev`
 
 See [INSTALL.md](INSTALL.md) for model/binary download instructions.
 
@@ -31,8 +55,9 @@ See [INSTALL.md](INSTALL.md) for model/binary download instructions.
 
 | Command | Description |
 |---|---|
+| `npm run dev:web` | Web mode — backend + Vite (Replit) |
+| `npm run dev:server` | Backend only |
 | `npm run dev` | Electron dev mode (macOS only) |
-| `npm run dev:web` | Web preview via Vite (Replit) |
 | `npm run build:mac` | Package macOS .app |
 | `npm run typecheck` | TypeScript check |
 | `npm run lint` | ESLint |
@@ -41,11 +66,17 @@ See [INSTALL.md](INSTALL.md) for model/binary download instructions.
 ## Project structure
 
 ```
+server/
+└── index.ts        Express API backend (web mode only)
 src/
-├── main/       Electron main process (services, IPC, audio pipeline)
-├── preload/    Preload script — exposes window.api to renderer
-└── renderer/   React UI (the part visible in the Replit web preview)
-src/shared/     Shared types and i18n
+├── main/           Electron main process (macOS desktop)
+├── preload/        Preload script — exposes window.api to renderer
+└── renderer/       React UI
+    └── src/
+        ├── api-web.ts   Web implementation of window.api (browser Speech APIs + fetch)
+        └── api-stub.ts  No-op stub (kept for reference, not used)
+src/shared/         Shared types and i18n
+vite.web.config.ts  Standalone Vite config for web mode
 ```
 
 ## User preferences
