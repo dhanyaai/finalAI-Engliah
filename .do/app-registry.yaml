@@ -1,0 +1,25 @@
+name: hikid
+region: nyc
+
+services:
+  - name: web
+    image:
+      registry_type: DOCR
+      registry: hikid
+      repository: hikid
+      tag: latest
+    http_port: 8080
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    health_check:
+      http_path: /api/deps
+      initial_delay_seconds: 10
+      period_seconds: 30
+    envs:
+      - key: NODE_ENV
+        scope: RUN_TIME
+        value: production
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        value: REPLACE_WITH_YOUR_KEY
+        type: SECRET
