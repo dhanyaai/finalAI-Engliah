@@ -68,5 +68,8 @@
   },
   "overrides": {
     "@eslint/config-array": "^0.23.5"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }
