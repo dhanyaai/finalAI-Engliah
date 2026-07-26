@@ -68,7 +68,7 @@ function getLlmConfig(): Pick<
 const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '15000', 10)
 let LLM_UNREACHABLE_HINT = process.env.LLM_UNREACHABLE_HINT || t('error.llm_unreachable')
 
-import { type Agent } from '@mariozechner/pi-agent-core'
+import { type Agent } from '@earendil-works/pi-agent-core'
 
 async function promptWithTimeout(agent: Agent, text: string): Promise<void> {
   return new Promise((resolve, reject) => {

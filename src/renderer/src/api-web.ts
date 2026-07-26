@@ -14,7 +14,6 @@
 
 type KittenState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted'
 type Unsubscribe = () => void
-type Listener<T> = (data: T) => void
 
 interface ConfigData {
   aiName: string

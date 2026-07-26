@@ -1,5 +1,5 @@
-import { Agent, type AgentEvent, type StreamFn } from '@mariozechner/pi-agent-core'
-import type { Model, AssistantMessageEvent } from '@mariozechner/pi-ai'
+import { Agent, type AgentEvent, type StreamFn } from '@earendil-works/pi-agent-core'
+import type { Model, AssistantMessageEvent } from '@earendil-works/pi-ai'
 import { playSentence, stopPlayback } from './playback'
 import { getMainWindow } from './window'
 import { logger } from './logger'
@@ -42,7 +42,7 @@ function createTtsStreamFn(
   baseStreamFn: StreamFn,
   baseUrl: string,
   createAssistantMessageEventStreamFn: () => ReturnType<
-    typeof import('@mariozechner/pi-ai').createAssistantMessageEventStream
+    typeof import('@earendil-works/pi-ai').createAssistantMessageEventStream
   >,
   unreachableHint: string
 ): StreamFn {
@@ -143,9 +143,10 @@ export interface AgentConfig {
 export async function createAgent(config: AgentConfig): Promise<Agent> {
   const localTtsBaseUrl = `http://localhost:${config.ttsPort}`
 
-  // Dynamically import ESM-only pi-ai module
-  const piAi = await import('@mariozechner/pi-ai')
-  const streamSimple = piAi.streamSimple
+  // Dynamically import ESM-only pi-ai modules
+  const piAi = await import('@earendil-works/pi-ai')
+  const openAiCompletions = await import('@earendil-works/pi-ai/api/openai-completions')
+  const streamSimple = openAiCompletions.streamSimple
   const createAssistantMessageEventStream = piAi.createAssistantMessageEventStream
 
   // Warm up TTS engine so first real sentence doesn't hit cold-start truncation
