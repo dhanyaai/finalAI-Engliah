@@ -90,6 +90,46 @@ src/shared/         Shared types and i18n
 vite.web.config.ts  Standalone Vite config for web mode
 ```
 
+## Deploying to DigitalOcean
+
+### Option A — App Platform (easiest, ~$5/month)
+
+1. **Push to GitHub** — fork/push this repo to your GitHub account.
+
+2. **Create a new App** at [cloud.digitalocean.com/apps](https://cloud.digitalocean.com/apps):
+   - Source: GitHub → your repo → `main` branch
+   - DigitalOcean will auto-detect the `Dockerfile`
+
+3. **Set the secret** in the App Platform dashboard:
+   - Environment variables → Add → `OPENAI_API_KEY` = your key → mark as **Secret**
+
+4. **Deploy** — App Platform builds the Docker image and serves it. Takes ~3 minutes.
+
+   Or use the CLI:
+   ```bash
+   doctl apps create --spec .do/app.yaml
+   # Then add the secret via the dashboard or:
+   doctl apps update <app-id> --set-env OPENAI_API_KEY=sk-...
+   ```
+
+### Option B — Droplet (manual, ~$4/month)
+
+```bash
+# On your Droplet (Ubuntu 22.04):
+git clone https://github.com/YOUR_USERNAME/hi-kid.git && cd hi-kid
+docker build -t hikid .
+docker run -d -p 80:8080 -e OPENAI_API_KEY=sk-... -e NODE_ENV=production hikid
+```
+
+### Production build scripts
+
+| Command | What it does |
+|---|---|
+| `npm run build:web` | Vite → `src/renderer/dist/` |
+| `npm run start:prod` | Express serves API + built frontend on `$PORT` |
+
+The production server is a **single process on one port** — Express handles both the `/api/*` routes and serves the pre-built React app as static files.
+
 ## User preferences
 
 - Keep existing project structure and stack; do not restructure or migrate.

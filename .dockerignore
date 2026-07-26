@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Dev artifacts
+node_modules
+src/renderer/dist
+out
+dist
+.cache
+
+# Electron build output (not needed for web deployment)
+build/*.icns
+build/*.plist
+electron-builder*.yml
+
+# Logs and local config
+*.log
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+.vscode
+*.swp
+
+# Replit / agent internals
+.replit
+.local
+.agents
+replit.nix

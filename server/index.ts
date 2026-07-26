@@ -289,10 +289,28 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
+// ─── Static frontend (production only) ───────────────────────────────────────
+// In dev mode Vite serves the frontend itself; in production Express serves the
+// pre-built files from src/renderer/dist so only one process/port is needed.
+
+if (process.env.NODE_ENV === 'production') {
+  // __dirname is not available in ESM; resolve relative to the process cwd
+  const distPath = path.resolve(process.cwd(), 'src', 'renderer', 'dist')
+  app.use(express.static(distPath))
+  // SPA fallback — serve index.html for any non-API route (Express 5 syntax)
+  app.get('/{*path}', (_req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'))
+  })
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.API_PORT || '3000', 10)
-app.listen(PORT, () => {
-  console.log(`[HiKid] Backend API running on http://localhost:${PORT}`)
+// DigitalOcean App Platform injects PORT; fall back to 3000 for local dev.
+const PORT = parseInt(process.env.PORT || process.env.API_PORT || '3000', 10)
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[HiKid] Server running on http://0.0.0.0:${PORT}`)
   console.log(`[HiKid] LLM endpoint: ${loadConfig().baseUrl}`)
+  if (process.env.NODE_ENV === 'production') {
+    console.log('[HiKid] Serving built frontend from src/renderer/dist')
+  }
 })

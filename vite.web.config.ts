@@ -23,6 +23,10 @@ export default defineConfig({
       '@shared': resolve('src/shared')
     }
   },
+  build: {
+    outDir: 'dist',   // relative to root (src/renderer), so → src/renderer/dist
+    emptyOutDir: true
+  },
   server: {
     host: '0.0.0.0',
     port: 5000,
