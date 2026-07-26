@@ -1,0 +1,1 @@
+- [Web chat dual backends](web-chat-dual-backends.md) — /api/chat served by Vite plugin in dev but Express in prod; contract changes must land in both or prod breaks invisibly.

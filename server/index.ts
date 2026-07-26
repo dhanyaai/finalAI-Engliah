@@ -175,14 +175,44 @@ app.post('/api/interrupt', (_req, res) => {
 })
 
 // POST /api/chat — SSE streaming
+//
+// Two supported request contracts:
+//  A) { messages: [{role, text}, ...] } — stateless; the client owns the full
+//     history (this is what the web client sends, same as the Vite dev plugin)
+//  B) { message: "..." } — legacy single message; server keeps history
 app.post('/api/chat', async (req, res) => {
-  const { message } = req.body as { message: string }
+  const body = req.body as {
+    message?: unknown
+    messages?: Array<{ role?: string; text?: unknown; content?: unknown }>
+  }
 
-  // Reject empty/null messages before they corrupt the history
-  const trimmedMessage = typeof message === 'string' ? message.trim() : ''
-  if (!trimmedMessage) {
-    res.status(400).json({ error: 'message must be a non-empty string' })
-    return
+  const stateless = Array.isArray(body.messages)
+  let llmHistory: Message[]
+
+  if (stateless) {
+    llmHistory = (body.messages ?? [])
+      .map((m) => {
+        const raw =
+          typeof m.text === 'string' ? m.text : typeof m.content === 'string' ? m.content : ''
+        return {
+          role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const),
+          content: raw.trim()
+        }
+      })
+      .filter((m) => m.content)
+    if (llmHistory.length === 0) {
+      res.status(400).json({ error: 'messages array contains no valid entries' })
+      return
+    }
+  } else {
+    // Reject empty/null messages before they corrupt the history
+    const trimmedMessage = typeof body.message === 'string' ? body.message.trim() : ''
+    if (!trimmedMessage) {
+      res.status(400).json({ error: 'message must be a non-empty string' })
+      return
+    }
+    history.push({ role: 'user', content: trimmedMessage })
+    llmHistory = history.filter((m) => typeof m.content === 'string' && m.content.trim())
   }
 
   res.setHeader('Content-Type', 'text/event-stream')
@@ -197,9 +227,15 @@ app.post('/api/chat', async (req, res) => {
   const cfg = loadConfig()
   const systemPrompt = cfg.systemPrompt.replace(/\{\{AI_NAME\}\}/g, cfg.aiName)
 
-  history.push({ role: 'user', content: trimmedMessage })
-
-  currentAbort = new AbortController()
+  // Per-request abort controller. When the client disconnects (its interrupt
+  // aborts the fetch), cancel the upstream LLM stream for THIS request only.
+  // The global currentAbort is only used in legacy mode so /api/interrupt and
+  // /api/reset can't kill other users' in-flight streams on a shared server.
+  const abort = new AbortController()
+  res.on('close', () => abort.abort())
+  if (!stateless) {
+    currentAbort = abort
+  }
 
   let fullResponse = ''
 
@@ -212,28 +248,24 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: cfg.modelName,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          // Strip any history entries with null/empty content (defensive)
-          ...history.filter((m) => typeof m.content === 'string' && m.content.trim())
-        ],
+        messages: [{ role: 'system', content: systemPrompt }, ...llmHistory],
         stream: true
       }),
-      signal: currentAbort.signal
+      signal: abort.signal
     })
 
     if (!llmRes.ok) {
       const errText = await llmRes.text().catch(() => llmRes.statusText)
       send({ type: 'error', message: `LLM error ${llmRes.status}: ${errText}` })
       res.end()
-      history.pop() // remove the user message we just added
+      if (!stateless) history.pop() // remove the user message we just added
       return
     }
 
     if (!llmRes.body) {
       send({ type: 'error', message: 'LLM returned no response body' })
       res.end()
-      history.pop()
+      if (!stateless) history.pop()
       return
     }
 
@@ -284,7 +316,9 @@ app.post('/api/chat', async (req, res) => {
       send({ type: 'sentence', text: sentenceBuffer.trim() })
     }
 
-    history.push({ role: 'assistant', content: fullResponse })
+    if (!stateless && fullResponse) {
+      history.push({ role: 'assistant', content: fullResponse })
+    }
     send({ type: 'done' })
     res.end()
   } catch (err: unknown) {
@@ -294,7 +328,7 @@ app.post('/api/chat', async (req, res) => {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[chat] Error:', message)
       send({ type: 'error', message })
-      history.pop() // don't store failed user messages
+      if (!stateless) history.pop() // don't store failed user messages
     }
     res.end()
   }
