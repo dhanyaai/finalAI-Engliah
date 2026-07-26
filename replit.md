@@ -64,9 +64,15 @@ See [INSTALL.md](INSTALL.md) for model/binary download instructions.
 | `npm run dev:server` | Backend only |
 | `npm run dev` | Electron dev mode (macOS only) |
 | `npm run build:mac` | Package macOS .app |
-| `npm run typecheck` | TypeScript check |
+| `npm run typecheck` | TypeScript check (node + web) — run before pushing |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest unit tests |
+
+### Type checking
+
+`npm run typecheck` runs `tsc --noEmit` across both the Node/Electron (`tsconfig.node.json`) and web/renderer (`tsconfig.web.json`) configs. Run it locally before pushing to catch errors early.
+
+The **Type Check** GitHub Actions workflow (`.github/workflows/typecheck.yml`) runs `npm run typecheck` automatically on every push and pull request, so any type error introduced by a future dependency update will surface in CI before it reaches production.
 
 ## Project structure
 
