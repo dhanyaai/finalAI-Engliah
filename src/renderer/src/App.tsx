@@ -406,13 +406,25 @@ function App(): React.JSX.Element {
               <div className="mic-area">
                 {webChat ? (
                   <>
+                    <VoiceButton
+                      isRecording={isRecording}
+                      onPointerDown={startRecording}
+                      onPointerUp={stopRecording}
+                      disabled={
+                        !servicesReady ||
+                        isProcessing ||
+                        kittenState === 'thinking' ||
+                        kittenState === 'speaking'
+                      }
+                    />
+                    <span className="mic-label">{getMicLabel()}</span>
                     {(isProcessing || kittenState === 'thinking') && (
                       <span className="thinking-spinner" aria-hidden="true" />
                     )}
                     <ChatInput
                       disabled={!servicesReady || isProcessing || kittenState === 'thinking'}
                       onSend={handleSendText}
-                      placeholder={`Say something to ${aiName}…`}
+                      placeholder={`Or type to ${aiName}…`}
                     />
                   </>
                 ) : showVoiceButton ? (
