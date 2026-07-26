@@ -178,6 +178,13 @@ app.post('/api/interrupt', (_req, res) => {
 app.post('/api/chat', async (req, res) => {
   const { message } = req.body as { message: string }
 
+  // Reject empty/null messages before they corrupt the history
+  const trimmedMessage = typeof message === 'string' ? message.trim() : ''
+  if (!trimmedMessage) {
+    res.status(400).json({ error: 'message must be a non-empty string' })
+    return
+  }
+
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
@@ -190,7 +197,7 @@ app.post('/api/chat', async (req, res) => {
   const cfg = loadConfig()
   const systemPrompt = cfg.systemPrompt.replace(/\{\{AI_NAME\}\}/g, cfg.aiName)
 
-  history.push({ role: 'user', content: message })
+  history.push({ role: 'user', content: trimmedMessage })
 
   currentAbort = new AbortController()
 
@@ -205,7 +212,11 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: cfg.modelName,
-        messages: [{ role: 'system', content: systemPrompt }, ...history],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          // Strip any history entries with null/empty content (defensive)
+          ...history.filter((m) => typeof m.content === 'string' && m.content.trim())
+        ],
         stream: true
       }),
       signal: currentAbort.signal
