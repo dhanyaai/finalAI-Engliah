@@ -61,6 +61,27 @@ function sseWrite(res: ServerResponse, type: string, extra: Record<string, unkno
   res.write(`data: ${JSON.stringify({ type, ...extra })}\n\n`)
 }
 
+// Mirrors the same logic in server/index.ts and src/main/services/agent.ts so
+// sentence boundaries are detected consistently across all three paths.
+function extractSentences(text: string): { sentences: string[]; remainder: string } {
+  const sentences: string[] = []
+  let start = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (/[.!?。！？]/.test(ch)) {
+      const next = text[i + 1]
+      if (next === undefined || /\s/.test(next) || /[.!?。！？]/.test(next)) {
+        const sentence = text.slice(start, i + 1).trim()
+        if (sentence) sentences.push(sentence)
+        start = i + 1
+        while (start < text.length && /\s/.test(text[start])) start++
+        i = start - 1
+      }
+    }
+  }
+  return { sentences, remainder: text.slice(start) }
+}
+
 async function handleChat(req: Connect.IncomingMessage, res: ServerResponse): Promise<void> {
   const { baseUrl, apiKey, model } = getLlmConfig()
 
@@ -137,6 +158,7 @@ async function handleChat(req: Connect.IncomingMessage, res: ServerResponse): Pr
   const reader = upstream.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let sentenceBuffer = ''
 
   try {
     for (;;) {
@@ -156,11 +178,23 @@ async function handleChat(req: Connect.IncomingMessage, res: ServerResponse): Pr
             choices?: Array<{ delta?: { content?: string } }>
           }
           const delta = parsed.choices?.[0]?.delta?.content
-          if (delta) sseWrite(res, 'delta', { text: delta })
+          if (delta) {
+            sseWrite(res, 'delta', { text: delta })
+            sentenceBuffer += delta
+            const { sentences, remainder } = extractSentences(sentenceBuffer)
+            for (const sentence of sentences) {
+              sseWrite(res, 'sentence', { text: sentence })
+            }
+            sentenceBuffer = remainder
+          }
         } catch {
           // ignore malformed chunks
         }
       }
+    }
+    // Flush any trailing partial sentence
+    if (sentenceBuffer.trim()) {
+      sseWrite(res, 'sentence', { text: sentenceBuffer.trim() })
     }
     sseWrite(res, 'done', {})
   } catch (err) {
