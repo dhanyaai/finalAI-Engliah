@@ -51,6 +51,11 @@ The native Electron app uses local models (no cloud API needed):
 
 See [INSTALL.md](INSTALL.md) for model/binary download instructions.
 
+## Dependency security notes (July 2026)
+
+- `npm audit fix` plus a `brace-expansion: ^5.0.8` override in `package.json` cleared the critical (node-tar) and all high vulnerabilities (31 → 3).
+- **Remaining (3 moderate, accepted for now):** `@anthropic-ai/sdk` (GHSA-p7fg-763f-g4gf, insecure default file permissions in a local memory tool) pulled in via `@mariozechner/pi-ai` / `pi-agent-core`. Fixing requires a breaking upgrade to `pi-ai`/`pi-agent-core` `0.73.x`; low practical risk since the affected SDK tool isn't used here. Revisit when upgrading those packages.
+
 ## Key scripts
 
 | Command | Description |
