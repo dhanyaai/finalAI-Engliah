@@ -242,8 +242,120 @@ function getSpeechRecognition(): SpeechRecognitionCtor | null {
 }
 
 let recognition: SpeechRecognition | null = null
-let recognitionActive = false
+let gestureActive = false // user is currently holding the mic button
+let restartAttempted = false // one retry per gesture when engine start races
+let retryPending = false // a deferred restart is scheduled
 let latestTranscript = ''
+
+/** Detach handlers and kill any previous session so a zombie recognition
+ *  can't fire late events or block the next start. */
+function disposeRecognition(): void {
+  if (!recognition) return
+  recognition.onstart = null
+  recognition.onresult = null
+  recognition.onerror = null
+  recognition.onend = null
+  try {
+    recognition.abort()
+  } catch {
+    // already stopped
+  }
+  recognition = null
+
+}
+
+function scheduleRetry(): void {
+  restartAttempted = true
+  retryPending = true
+  setTimeout(() => {
+    retryPending = false
+    if (gestureActive) {
+      beginRecognition()
+    } else {
+      emit('kittenState', 'idle')
+    }
+  }, 150)
+}
+
+function beginRecognition(): void {
+  const SR = getSpeechRecognition()
+  if (!SR) return
+
+  const rec = new SR()
+  recognition = rec
+  rec.lang = 'en-US'
+  rec.interimResults = true
+  rec.maxAlternatives = 1
+  rec.continuous = false
+
+  rec.onstart = (): void => {
+
+    emit('kittenState', 'listening')
+    // The user released the button while the engine was still starting up —
+    // stop now so the gesture still produces whatever was captured.
+    if (!gestureActive) {
+      try {
+        rec.stop()
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  rec.onresult = (event: SpeechRecognitionEvent): void => {
+    const result = event.results[event.results.length - 1]
+    const transcript = result[0].transcript.trim()
+
+    if (result.isFinal) {
+      latestTranscript = transcript
+    }
+    // Interim + final both update the live preview
+    emit('transcription', { text: transcript })
+  }
+
+  rec.onerror = (event: SpeechRecognitionErrorEvent): void => {
+
+    if (event.error === 'aborted') {
+      // Chrome kills a session that starts while the previous one (or TTS)
+      // is still winding down. Retry once while the button is still held —
+      // otherwise the mic looks alive but hears nothing.
+      if (gestureActive && !restartAttempted) {
+        scheduleRetry()
+        return
+      }
+      emit('kittenState', 'idle')
+      return
+    }
+    if (event.error === 'no-speech') {
+      emit('transcription', { text: '' }) // clears pending placeholder
+    } else {
+      emit('error', { message: `Microphone error: ${event.error}` })
+    }
+    emit('kittenState', 'idle')
+  }
+
+  rec.onend = (): void => {
+
+    if (latestTranscript) {
+      // Fire-and-forget: send to LLM
+      sendMessage(latestTranscript).catch(() => {})
+      latestTranscript = ''
+    } else if (!retryPending) {
+      emit('kittenState', 'idle')
+    }
+  }
+
+  try {
+    rec.start()
+  } catch {
+    // start() itself can throw if another session still holds the engine
+    if (gestureActive && !restartAttempted) {
+      scheduleRetry()
+    } else {
+      emit('kittenState', 'idle')
+    }
+  }
+}
 
 function startRecording(): Promise<boolean> {
   const SR = getSpeechRecognition()
@@ -257,60 +369,22 @@ function startRecording(): Promise<boolean> {
 
   stopTts()
   chatAbort?.abort()
+  disposeRecognition()
   latestTranscript = ''
-
-  recognition = new SR()
-  recognition.lang = 'en-US'
-  recognition.interimResults = true
-  recognition.maxAlternatives = 1
-  recognition.continuous = false
-
-  recognition.onstart = (): void => {
-    recognitionActive = true
-    emit('kittenState', 'listening')
-  }
-
-  recognition.onresult = (event: SpeechRecognitionEvent): void => {
-    const result = event.results[event.results.length - 1]
-    const transcript = result[0].transcript.trim()
-
-    if (result.isFinal) {
-      latestTranscript = transcript
-      emit('transcription', { text: transcript })
-    } else {
-      // Interim result — show in transcription but don't send yet
-      emit('transcription', { text: transcript })
-    }
-  }
-
-  recognition.onerror = (event: SpeechRecognitionErrorEvent): void => {
-    recognitionActive = false
-    if (event.error === 'no-speech') {
-      emit('transcription', { text: '' }) // clears pending placeholder
-    } else if (event.error !== 'aborted') {
-      emit('error', { message: `Microphone error: ${event.error}` })
-    }
-    emit('kittenState', 'idle')
-  }
-
-  recognition.onend = (): void => {
-    recognitionActive = false
-    if (latestTranscript) {
-      // Fire-and-forget: send to LLM
-      sendMessage(latestTranscript).catch(() => {})
-      latestTranscript = ''
-    } else {
-      emit('kittenState', 'idle')
-    }
-  }
-
-  recognition.start()
+  gestureActive = true
+  restartAttempted = false
+  beginRecognition()
   return Promise.resolve(true)
 }
 
 function stopRecording(): Promise<void> {
-  if (recognition && recognitionActive) {
-    recognition.stop()
+  gestureActive = false
+  if (recognition) {
+    try {
+      recognition.stop()
+    } catch {
+      // engine not started yet — onstart handler will stop it
+    }
   }
   return Promise.resolve()
 }

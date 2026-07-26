@@ -1,1 +1,2 @@
 - [Web chat dual backends](web-chat-dual-backends.md) — /api/chat served by Vite plugin in dev but Express in prod; contract changes must land in both or prod breaks invisibly.
+- [Web voice pipeline quirks](web-voice-pipeline-quirks.md) — Chrome aborts mic sessions started during TTS wind-down; dispose + retry-once per gesture, never ignore 'aborted' silently.
