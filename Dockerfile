@@ -13,10 +13,9 @@ RUN npm install --ignore-scripts --no-audit --no-fund --package-lock=false
 # Copy source and build
 COPY . .
 # COPY above also brings in the desktop package.json. Restore the web-only
-# manifest so build/prune cannot pull the Electron dependency tree back in.
+# manifest so the runtime stays independent of the Electron dependency tree.
 COPY deploy/package.json ./package.json
 RUN npm run build:web
-RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
 # ── Stage 2: production runtime ───────────────────────────────────────────────
 FROM node:22.22-alpine AS runtime
@@ -24,8 +23,8 @@ FROM node:22.22-alpine AS runtime
 WORKDIR /app
 ENV npm_config_cache=/tmp/npm-cache
 
-# Reuse the pruned web dependencies from the builder instead of running a
-# second package installation.
+# Reuse the minimal web dependencies from the builder instead of running a
+# second package operation, which could require build-only registry access.
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 
