@@ -12,6 +12,9 @@ RUN npm install --ignore-scripts --no-audit --no-fund --package-lock=false
 
 # Copy source and build
 COPY . .
+# COPY above also brings in the desktop package.json. Restore the web-only
+# manifest so build/prune cannot pull the Electron dependency tree back in.
+COPY deploy/package.json ./package.json
 RUN npm run build:web
 RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
