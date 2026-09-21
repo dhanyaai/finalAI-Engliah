@@ -16,6 +16,16 @@ import cors from 'cors'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import crypto from 'crypto'
+import { promisify } from 'util'
+import { Pool } from 'pg'
+import { clerkMiddleware, getAuth } from '@clerk/express'
+import { publishableKeyFromHost } from '@clerk/shared/keys'
+import {
+  CLERK_PROXY_PATH,
+  clerkProxyMiddleware,
+  getClerkProxyHost
+} from './middlewares/clerkProxyMiddleware'
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -120,8 +130,319 @@ function extractSentences(text: string): { sentences: string[]; remainder: strin
 // ─── Express app ─────────────────────────────────────────────────────────────
 
 const app = express()
-app.use(cors())
+app.use(CLERK_PROXY_PATH, clerkProxyMiddleware())
+app.use(cors({ credentials: true, origin: true }))
 app.use(express.json())
+app.use(
+  clerkMiddleware((req) => ({
+    publishableKey: publishableKeyFromHost(
+      getClerkProxyHost(req) ?? '',
+      process.env.CLERK_PUBLISHABLE_KEY
+    )
+  }))
+)
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const scrypt = promisify(crypto.scrypt)
+const DEFAULT_SCORES = { Speaking: 34, Listening: 51, Reading: 28, Writing: 22, Vocabulary: 63, Grammar: 39 }
+type AuthRequest = express.Request & { userId?: string }
+const PARENT_GRANT_COOKIE = 'hikid_parent_grant'
+const PARENT_GRANT_SECONDS = 15 * 60
+const PIN_WINDOW_MS = 15 * 60 * 1000
+const PIN_MAX_ATTEMPTS = 5
+const pinAttempts = new Map<string, { count: number; resetAt: number }>()
+
+function requireAuth(req: AuthRequest, res: express.Response, next: express.NextFunction): void {
+  const auth = getAuth(req)
+  const userId = (auth?.sessionClaims?.userId as string | undefined) || auth?.userId
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  req.userId = userId
+  next()
+}
+
+async function familyIdFor(userId: string): Promise<string> {
+  const result = await pool.query(
+    `INSERT INTO families (clerk_user_id) VALUES ($1)
+     ON CONFLICT (clerk_user_id) DO UPDATE SET updated_at = now()
+     RETURNING id`,
+    [userId]
+  )
+  return result.rows[0].id as string
+}
+
+function authSecret(): string {
+  const secret = process.env.SESSION_SECRET || process.env.CLERK_SECRET_KEY
+  if (!secret) throw new Error('SESSION_SECRET is required for parent authorization')
+  return secret
+}
+
+function cookieValue(req: express.Request, name: string): string | undefined {
+  const cookie = req.headers.cookie?.split(';').map((item) => item.trim())
+    .find((item) => item.startsWith(`${name}=`))
+  return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined
+}
+
+function parentGrant(userId: string, familyId: string): string {
+  const payload = Buffer.from(JSON.stringify({
+    userId,
+    familyId,
+    expiresAt: Date.now() + PARENT_GRANT_SECONDS * 1000
+  })).toString('base64url')
+  const signature = crypto.createHmac('sha256', authSecret()).update(payload).digest('base64url')
+  return `${payload}.${signature}`
+}
+
+function hasValidParentGrant(req: AuthRequest, familyId: string): boolean {
+  const token = cookieValue(req, PARENT_GRANT_COOKIE)
+  if (!token) return false
+  const [payload, signature] = token.split('.')
+  if (!payload || !signature) return false
+  const expected = crypto.createHmac('sha256', authSecret()).update(payload).digest()
+  const received = Buffer.from(signature, 'base64url')
+  if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) return false
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString()) as {
+      userId?: string
+      familyId?: string
+      expiresAt?: number
+    }
+    return parsed.userId === req.userId && parsed.familyId === familyId &&
+      typeof parsed.expiresAt === 'number' && parsed.expiresAt > Date.now()
+  } catch {
+    return false
+  }
+}
+
+function setParentGrant(res: express.Response, userId: string, familyId: string): void {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+  res.setHeader('Set-Cookie',
+    `${PARENT_GRANT_COOKIE}=${encodeURIComponent(parentGrant(userId, familyId))}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${PARENT_GRANT_SECONDS}${secure}`)
+}
+
+async function requireParentAccess(req: AuthRequest, res: express.Response, next: express.NextFunction): Promise<void> {
+  try {
+    const familyId = await familyIdFor(req.userId!)
+    const result = await pool.query('SELECT parent_pin_hash IS NOT NULL AS has_pin FROM families WHERE id=$1', [familyId])
+    if (!result.rows[0]?.has_pin || hasValidParentGrant(req, familyId)) {
+      next()
+      return
+    }
+    res.status(403).json({ error: 'Parent PIN verification required' })
+  } catch (error) {
+    next(error)
+  }
+}
+
+function cleanProfile(body: Record<string, unknown>) {
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : ''
+  const ageBand = body.ageBand
+  const level = typeof body.level === 'string' ? body.level.trim().slice(0, 20) : ''
+  const dailyGoalMinutes = Number(body.dailyGoalMinutes)
+  if (!name || !['5–8', '9–12', '13–15'].includes(String(ageBand)) || !level ||
+      !Number.isInteger(dailyGoalMinutes) || dailyGoalMinutes < 5 || dailyGoalMinutes > 180) {
+    throw new Error('Invalid learner profile')
+  }
+  return { name, ageBand: String(ageBand), level, dailyGoalMinutes }
+}
+
+app.get('/api/family', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const familyId = await familyIdFor(req.userId!)
+    const family = await pool.query(
+      `SELECT daily_limit_minutes, privacy_settings, parent_pin_hash IS NOT NULL AS has_pin
+       FROM families WHERE id = $1`,
+      [familyId]
+    )
+    const children = await pool.query(
+      `SELECT c.id, c.name, c.age_band, c.level, c.daily_goal_minutes,
+              p.completed_lesson_ids, p.minutes, p.streak, p.skill_scores, p.assessments
+       FROM child_profiles c
+       JOIN child_progress p ON p.child_id = c.id
+       WHERE c.family_id = $1 ORDER BY c.created_at`,
+      [familyId]
+    )
+    res.json({
+      settings: {
+        dailyLimitMinutes: family.rows[0].daily_limit_minutes,
+        privacySettings: family.rows[0].privacy_settings,
+        hasPin: family.rows[0].has_pin
+      },
+      children: children.rows.map((row) => ({
+        id: row.id,
+        profile: { name: row.name, ageBand: row.age_band, level: row.level, dailyGoalMinutes: row.daily_goal_minutes },
+        progress: {
+          completedLessonIds: row.completed_lesson_ids,
+          minutes: row.minutes,
+          streak: row.streak,
+          skillScores: row.skill_scores,
+          assessments: row.assessments
+        }
+      }))
+    })
+  } catch (error) {
+    console.error('[family] load failed', error)
+    res.status(500).json({ error: 'Could not load family data' })
+  }
+})
+
+app.post('/api/family/children', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  const client = await pool.connect()
+  try {
+    const profile = cleanProfile(req.body as Record<string, unknown>)
+    const familyId = await familyIdFor(req.userId!)
+    await client.query('BEGIN')
+    const child = await client.query(
+      `INSERT INTO child_profiles (family_id, name, age_band, level, daily_goal_minutes)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [familyId, profile.name, profile.ageBand, profile.level, profile.dailyGoalMinutes]
+    )
+    await client.query(
+      `INSERT INTO child_progress (child_id, skill_scores) VALUES ($1,$2::jsonb)`,
+      [child.rows[0].id, JSON.stringify(DEFAULT_SCORES)]
+    )
+    await client.query('COMMIT')
+    res.status(201).json({ id: child.rows[0].id })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not create learner' })
+  } finally {
+    client.release()
+  }
+})
+
+app.post('/api/family/migrate', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  const client = await pool.connect()
+  try {
+    const body = req.body as Record<string, unknown>
+    const profile = cleanProfile((body.profile ?? {}) as Record<string, unknown>)
+    const progress = (body.progress ?? {}) as Record<string, unknown>
+    const familyId = await familyIdFor(req.userId!)
+    const existing = await client.query('SELECT 1 FROM child_profiles WHERE family_id = $1 LIMIT 1', [familyId])
+    if (existing.rowCount) {
+      res.status(409).json({ error: 'Family already has learner profiles' })
+      return
+    }
+    await client.query('BEGIN')
+    const child = await client.query(
+      `INSERT INTO child_profiles (family_id, name, age_band, level, daily_goal_minutes)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [familyId, profile.name, profile.ageBand, profile.level, profile.dailyGoalMinutes]
+    )
+    const lessonIds = Array.isArray(progress.completedLessonIds) ? progress.completedLessonIds.filter((x): x is string => typeof x === 'string') : []
+    const scores = typeof progress.skillScores === 'object' && progress.skillScores ? progress.skillScores : DEFAULT_SCORES
+    await client.query(
+      `INSERT INTO child_progress (child_id, completed_lesson_ids, minutes, streak, skill_scores, assessments)
+       VALUES ($1,$2::jsonb,$3,$4,$5::jsonb,$6::jsonb)`,
+      [child.rows[0].id, JSON.stringify(lessonIds), Math.max(0, Number(progress.minutes) || 0),
+       Math.max(0, Number(progress.streak) || 0), JSON.stringify(scores),
+       JSON.stringify(Array.isArray(progress.assessments) ? progress.assessments : [])]
+    )
+    if (Number.isInteger(Number(body.dailyLimitMinutes))) {
+      await client.query('UPDATE families SET daily_limit_minutes = $1 WHERE id = $2',
+        [Math.min(180, Math.max(5, Number(body.dailyLimitMinutes))), familyId])
+    }
+    await client.query('COMMIT')
+    res.status(201).json({ id: child.rows[0].id })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Migration failed' })
+  } finally {
+    client.release()
+  }
+})
+
+app.post('/api/family/children/:childId/lessons/:lessonId/complete', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const familyId = await familyIdFor(req.userId!)
+    const duration = Math.min(180, Math.max(0, Number(req.body?.duration) || 0))
+    const score = Math.min(100, Math.max(0, Number(req.body?.score) || 0))
+    const lessonId = req.params.lessonId.slice(0, 120)
+    const result = await pool.query(
+      `UPDATE child_progress p SET
+         completed_lesson_ids = p.completed_lesson_ids || to_jsonb($1::text),
+         minutes = p.minutes + $2,
+         assessments = p.assessments || jsonb_build_array(jsonb_build_object('lessonId',$1,'score',$5,'completedAt',now())),
+         skill_scores = jsonb_set(jsonb_set(p.skill_scores, '{Speaking}', to_jsonb(LEAST(100, COALESCE((p.skill_scores->>'Speaking')::int,0)+8))), '{Listening}', to_jsonb(LEAST(100, COALESCE((p.skill_scores->>'Listening')::int,0)+5))),
+         updated_at = now()
+       FROM child_profiles c
+       WHERE p.child_id = c.id AND c.id = $3 AND c.family_id = $4
+         AND NOT p.completed_lesson_ids ? $1
+       RETURNING p.child_id`,
+      [lessonId, duration, req.params.childId, familyId, score]
+    )
+    res.json({ changed: Boolean(result.rowCount) })
+  } catch {
+    res.status(500).json({ error: 'Could not save lesson progress' })
+  }
+})
+
+app.put('/api/family/settings', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  try {
+    const familyId = await familyIdFor(req.userId!)
+    const limit = Math.min(180, Math.max(5, Number(req.body?.dailyLimitMinutes) || 20))
+    const privacy = { shareAnalytics: Boolean(req.body?.privacySettings?.shareAnalytics) }
+    await pool.query(
+      'UPDATE families SET daily_limit_minutes=$1, privacy_settings=$2::jsonb, updated_at=now() WHERE id=$3',
+      [limit, JSON.stringify(privacy), familyId]
+    )
+    res.json({ ok: true })
+  } catch {
+    res.status(500).json({ error: 'Could not save settings' })
+  }
+})
+
+app.put('/api/family/pin', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  const pin = typeof req.body?.pin === 'string' ? req.body.pin : ''
+  if (!/^\d{4,8}$/.test(pin)) {
+    res.status(400).json({ error: 'PIN must be 4–8 digits' })
+    return
+  }
+  const salt = crypto.randomBytes(16).toString('hex')
+  const hash = (await scrypt(pin, salt, 64) as Buffer).toString('hex')
+  const familyId = await familyIdFor(req.userId!)
+  await pool.query('UPDATE families SET parent_pin_hash=$1, parent_pin_salt=$2 WHERE id=$3', [hash, salt, familyId])
+  setParentGrant(res, req.userId!, familyId)
+  res.json({ ok: true })
+})
+
+app.post('/api/family/pin/verify', requireAuth, async (req: AuthRequest, res) => {
+  const attempt = pinAttempts.get(req.userId!)
+  if (attempt && attempt.resetAt > Date.now() && attempt.count >= PIN_MAX_ATTEMPTS) {
+    res.setHeader('Retry-After', String(Math.ceil((attempt.resetAt - Date.now()) / 1000)))
+    res.status(429).json({ error: 'Too many attempts. Try again later.' })
+    return
+  }
+  if (!attempt || attempt.resetAt <= Date.now()) {
+    pinAttempts.set(req.userId!, { count: 0, resetAt: Date.now() + PIN_WINDOW_MS })
+  }
+  const familyId = await familyIdFor(req.userId!)
+  const result = await pool.query('SELECT parent_pin_hash, parent_pin_salt FROM families WHERE id=$1', [familyId])
+  const row = result.rows[0]
+  if (!row?.parent_pin_hash || typeof req.body?.pin !== 'string') {
+    pinAttempts.get(req.userId!)!.count++
+    res.status(403).json({ error: 'Invalid PIN' })
+    return
+  }
+  const candidate = (await scrypt(req.body.pin, row.parent_pin_salt, 64) as Buffer)
+  const saved = Buffer.from(row.parent_pin_hash, 'hex')
+  if (candidate.length !== saved.length || !crypto.timingSafeEqual(candidate, saved)) {
+    pinAttempts.get(req.userId!)!.count++
+    res.status(403).json({ error: 'Invalid PIN' })
+    return
+  }
+  pinAttempts.delete(req.userId!)
+  setParentGrant(res, req.userId!, familyId)
+  res.json({ ok: true })
+})
+
+app.delete('/api/family', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  await pool.query('DELETE FROM families WHERE clerk_user_id=$1', [req.userId])
+  res.setHeader('Set-Cookie', `${PARENT_GRANT_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`)
+  res.status(204).end()
+})
 
 // GET /api/config
 app.get('/api/config', (_req, res) => {

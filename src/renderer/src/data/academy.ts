@@ -3,7 +3,10 @@ export interface LearnerProfile{name:string;ageBand:AgeBand;level:string;dailyGo
 export interface Unit{id:string;title:string;lessons:number}
 export interface Course{level:string;title:string;description:string;units:Unit[];lessonCount:number;color:string}
 export interface Lesson{id:string;title:string;objective:string;duration:number;type:string;status:string;vocabulary:string[]}
-export interface Progress{completedLessonIds:string[];minutes:number;streak:number;skillScores:Record<string,number>}
+export interface Assessment{lessonId:string;score:number;completedAt:string}
+export interface Progress{completedLessonIds:string[];minutes:number;streak:number;skillScores:Record<string,number>;assessments:Assessment[]}
+export interface ChildRecord{id:string;profile:LearnerProfile;progress:Progress}
+export interface FamilySettings{dailyLimitMinutes:number;privacySettings:{shareAnalytics:boolean};hasPin:boolean}
 export interface VideoScene{heading:string;body:string;spokenText:string;accent:string}
 export const courses:Course[]=[
  {level:'Pre-A1',title:'First Words',description:'Build a bright foundation for everyday English.',color:'#ff9b8b',lessonCount:18,units:[{id:'p1',title:'Hello, world',lessons:6},{id:'p2',title:'My little day',lessons:6},{id:'p3',title:'Play and move',lessons:6}]},
@@ -32,4 +35,4 @@ export const scenes:VideoScene[]=[
  {heading:'Your turn, bright spark.',body:'Say the phrase slowly. Let your voice travel all the way to the end.',spokenText:'Hello! My name is Pip. What is your name?',accent:'#ffd36e'},
  {heading:'Listen for the question.',body:'A friendly question keeps the conversation moving. Notice the rising sound at the end.',spokenText:'What is your name?',accent:'#bcefe0'}
 ]
-export const defaultProgress:Progress={completedLessonIds:[],minutes:42,streak:4,skillScores:{Speaking:34,Listening:51,Reading:28,Writing:22,Vocabulary:63,Grammar:39}}
+export const defaultProgress:Progress={completedLessonIds:[],minutes:0,streak:0,skillScores:{Speaking:34,Listening:51,Reading:28,Writing:22,Vocabulary:63,Grammar:39},assessments:[]}
