@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef } from 'react'
 import styles from './VoiceButton.module.css'
 
 interface VoiceButtonProps {
@@ -14,24 +14,27 @@ export default function VoiceButton({
   onPointerUp,
   disabled = false
 }: VoiceButtonProps): React.JSX.Element {
-  const [isPressed, setIsPressed] = useState(false)
+  const activePointer = useRef<number | null>(null)
+  const ended = useRef(false)
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>): void => {
     if (disabled) return
     e.currentTarget.setPointerCapture(e.pointerId)
-    setIsPressed(true)
+    activePointer.current = e.pointerId
+    ended.current = false
     onPointerDown()
   }
 
-  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>): void => {
-    if (!isPressed) return
-    setIsPressed(false)
+  const finish = (e: React.PointerEvent<HTMLButtonElement>): void => {
+    if (activePointer.current !== e.pointerId || ended.current) return
+    ended.current = true
+    activePointer.current = null
     try {
       e.currentTarget.releasePointerCapture(e.pointerId)
     } catch {
       // pointer capture may already be released
     }
-    if (!disabled) onPointerUp()
+    onPointerUp()
   }
 
   return (
@@ -39,9 +42,9 @@ export default function VoiceButton({
       className={`${styles.voiceButton} ${isRecording ? styles.recording : ''}`}
       aria-label="Hold to speak"
       onPointerDown={handlePointerDown}
-      onPointerUp={handlePointerUp}
-      onPointerLeave={handlePointerUp}
-      onPointerCancel={handlePointerUp}
+      onPointerUp={finish}
+      onPointerCancel={finish}
+      onLostPointerCapture={finish}
       disabled={disabled}
       type="button"
     >

@@ -48,7 +48,7 @@ export function isWebChatMode(): boolean {
 type BusMap = {
   serviceStatus: { ready: boolean }
   kittenState: KittenState
-  transcription: { text: string }
+  transcription: { text: string; interim?: boolean; sessionId?: number }
   llmDelta: { text: string }
   ttsEvent: 'start' | 'end'
   downloadProgress: DownloadProgress
@@ -75,57 +75,82 @@ function emit<K extends keyof BusMap>(channel: K, data: BusMap[K]): void {
 
 // ─── TTS via SpeechSynthesis ──────────────────────────────────────────────────
 
-let ttsQueue: Promise<void> = Promise.resolve()
-let pendingTtsCount = 0
-let ttsAborted = false
+let ttsQueue: string[] = []
+let ttsGeneration = 0
+let ttsSpeaking = false
+let selectedVoice: SpeechSynthesisVoice | undefined
+
+function chooseVoice(): SpeechSynthesisVoice | undefined {
+  const voices = speechSynthesis.getVoices()
+  selectedVoice =
+    voices.find((voice) => /^en(-|_)/i.test(voice.lang) && /google|microsoft|samantha/i.test(voice.name)) ??
+    voices.find((voice) => /^en(-|_)/i.test(voice.lang)) ??
+    voices[0]
+  return selectedVoice
+}
+
+if (typeof speechSynthesis !== 'undefined') {
+  speechSynthesis.addEventListener?.('voiceschanged', () => chooseVoice())
+  chooseVoice()
+}
+
+function pumpTts(generation: number): void {
+  if (ttsSpeaking || generation !== ttsGeneration) return
+  const text = ttsQueue.shift()
+  if (!text) {
+    emit('kittenState', 'idle')
+    return
+  }
+  ttsSpeaking = true
+  emit('ttsEvent', 'start')
+  emit('kittenState', 'speaking')
+  const utterance = new SpeechSynthesisUtterance(text)
+  utterance.lang = 'en-US'
+  utterance.rate = 0.95
+  utterance.voice = selectedVoice ?? chooseVoice() ?? null
+  let finished = false
+  const finish = (error?: string): void => {
+    if (finished) return
+    finished = true
+    ttsSpeaking = false
+    if (generation !== ttsGeneration) return
+    if (error && error !== 'canceled' && error !== 'interrupted') {
+      console.warn('[Voice/TTS] synthesis error:', error)
+      emit('error', { message: `Voice playback error: ${error}` })
+    }
+    emit('ttsEvent', 'end')
+    pumpTts(generation)
+  }
+  utterance.onend = () => finish()
+  utterance.onerror = (event: SpeechSynthesisErrorEvent) => finish(event.error)
+  try {
+    if (speechSynthesis.paused) speechSynthesis.resume()
+    speechSynthesis.speak(utterance)
+    console.info('[Voice/TTS] speak queued')
+  } catch (error) {
+    finish(error instanceof Error ? error.message : String(error))
+  }
+}
 
 function enqueueTts(text: string): void {
   const trimmed = text.trim()
-  if (!trimmed || ttsAborted) return
-
-  pendingTtsCount++
-  ttsQueue = ttsQueue.then(
-    () =>
-      new Promise<void>((resolve) => {
-        if (ttsAborted) {
-          pendingTtsCount--
-          resolve()
-          return
-        }
-        emit('ttsEvent', 'start')
-        emit('kittenState', 'speaking')
-
-        const utt = new SpeechSynthesisUtterance(trimmed)
-        utt.lang = 'en-US'
-        utt.rate = 0.95
-
-        const finish = (): void => {
-          pendingTtsCount--
-          emit('ttsEvent', 'end')
-          if (pendingTtsCount === 0 && !ttsAborted) {
-            emit('kittenState', 'idle')
-          }
-          resolve()
-        }
-
-        utt.onend = finish
-        utt.onerror = finish
-        speechSynthesis.speak(utt)
-      })
-  )
+  if (!trimmed) return
+  ttsQueue.push(trimmed)
+  pumpTts(ttsGeneration)
 }
 
 function stopTts(): void {
-  ttsAborted = true
+  ttsGeneration++
+  ttsQueue = []
+  ttsSpeaking = false
   speechSynthesis.cancel()
-  pendingTtsCount = 0
-  ttsQueue = Promise.resolve()
-  ttsAborted = false
+  emit('ttsEvent', 'end')
 }
 
 // ─── LLM chat ─────────────────────────────────────────────────────────────────
 
 let chatAbort: AbortController | null = null
+let chatGeneration = 0
 // Full conversation history so the LLM has context
 const chatHistory: Array<{ role: 'user' | 'assistant'; text: string }> = []
 
@@ -133,12 +158,14 @@ async function sendMessage(text: string): Promise<void> {
   const trimmed = text.trim()
   if (!trimmed) return
 
+  const generation = ++chatGeneration
+  chatAbort?.abort()
   stopTts()
   emit('kittenState', 'thinking')
   emit('llmDelta', { text: '' }) // clear previous delta in UI
 
   chatHistory.push({ role: 'user', text: trimmed })
-  emit('transcription', { text: trimmed })
+  emit('transcription', { text: trimmed, interim: false })
 
   chatAbort = new AbortController()
 
@@ -159,6 +186,7 @@ async function sendMessage(text: string): Promise<void> {
       } catch {
         // keep generic message
       }
+      if (generation !== chatGeneration) return
       emit('error', { message })
       emit('kittenState', 'idle')
       // Remove the user message we added since it didn't go through
@@ -188,23 +216,26 @@ async function sendMessage(text: string): Promise<void> {
           }
 
           if (evt.type === 'thinking') {
-            emit('kittenState', 'thinking')
+             if (generation !== chatGeneration) return
+             emit('kittenState', 'thinking')
           } else if (evt.type === 'delta' && evt.text) {
             assistantText += evt.text
-            emit('llmDelta', { text: evt.text })
+             if (generation === chatGeneration) emit('llmDelta', { text: evt.text })
           } else if (evt.type === 'sentence' && evt.text) {
-            enqueueTts(evt.text)
+             if (generation === chatGeneration) enqueueTts(evt.text)
           } else if (evt.type === 'done') {
-            if (assistantText) {
+             if (generation !== chatGeneration) return
+             if (assistantText) {
               chatHistory.push({ role: 'assistant', text: assistantText })
             }
-            if (pendingTtsCount === 0) emit('kittenState', 'idle')
+             if (!ttsSpeaking && ttsQueue.length === 0) emit('kittenState', 'idle')
           } else if (evt.type === 'interrupted') {
             emit('kittenState', 'interrupted')
             stopTts()
             emit('kittenState', 'idle')
           } else if (evt.type === 'error') {
-            emit('error', { message: evt.message ?? 'Unknown error' })
+             if (generation !== chatGeneration) return
+             emit('error', { message: evt.message ?? 'Unknown error' })
             emit('kittenState', 'idle')
             // Remove the user message we added since it failed
             chatHistory.pop()
@@ -216,10 +247,13 @@ async function sendMessage(text: string): Promise<void> {
     }
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {
-      stopTts()
-      emit('kittenState', 'idle')
+      if (generation === chatGeneration) {
+        stopTts()
+        emit('kittenState', 'idle')
+      }
     } else {
       const message = err instanceof Error ? err.message : String(err)
+      if (generation !== chatGeneration) return
       emit('error', { message })
       emit('kittenState', 'idle')
       // Remove the user message we added since it failed
@@ -245,7 +279,9 @@ let recognition: SpeechRecognition | null = null
 let gestureActive = false // user is currently holding the mic button
 let restartAttempted = false // one retry per gesture when engine start races
 let retryPending = false // a deferred restart is scheduled
-let latestTranscript = ''
+let finalTranscript = ''
+let interimTranscript = ''
+let recognitionSession = 0
 
 /** Detach handlers and kill any previous session so a zombie recognition
  *  can't fire late events or block the next start. */
@@ -261,7 +297,6 @@ function disposeRecognition(): void {
     // already stopped
   }
   recognition = null
-
 }
 
 function scheduleRetry(): void {
@@ -283,13 +318,14 @@ function beginRecognition(): void {
 
   const rec = new SR()
   recognition = rec
+  const sessionId = recognitionSession
   rec.lang = 'en-US'
   rec.interimResults = true
   rec.maxAlternatives = 1
   rec.continuous = false
 
   rec.onstart = (): void => {
-
+    console.info('[Voice/STT] start', sessionId)
     emit('kittenState', 'listening')
     // The user released the button while the engine was still starting up —
     // stop now so the gesture still produces whatever was captured.
@@ -303,18 +339,26 @@ function beginRecognition(): void {
   }
 
   rec.onresult = (event: SpeechRecognitionEvent): void => {
-    const result = event.results[event.results.length - 1]
-    const transcript = result[0].transcript.trim()
-
-    if (result.isFinal) {
-      latestTranscript = transcript
+    let finalPart = ''
+    let interimPart = ''
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index]
+      const transcript = result[0]?.transcript.trim() ?? ''
+      if (!transcript) continue
+      if (result.isFinal) finalPart += `${transcript} `
+      else interimPart += `${transcript} `
     }
-    // Interim + final both update the live preview
-    emit('transcription', { text: transcript })
+    if (finalPart) finalTranscript = `${finalTranscript} ${finalPart}`.trim()
+    if (interimPart) interimTranscript = interimPart.trim()
+    const preview = `${finalTranscript} ${interimTranscript}`.trim()
+    if (preview) {
+      console.info('[Voice/STT] result', preview)
+      emit('transcription', { text: preview, interim: !finalPart, sessionId })
+    }
   }
 
   rec.onerror = (event: SpeechRecognitionErrorEvent): void => {
-
+    console.warn('[Voice/STT] error', event.error)
     if (event.error === 'aborted') {
       // Chrome kills a session that starts while the previous one (or TTS)
       // is still winding down. Retry once while the button is still held —
@@ -335,11 +379,13 @@ function beginRecognition(): void {
   }
 
   rec.onend = (): void => {
-
-    if (latestTranscript) {
+    const transcript = `${finalTranscript} ${interimTranscript}`.trim()
+    console.info('[Voice/STT] end', transcript ? 'send' : 'empty')
+    if (transcript) {
       // Fire-and-forget: send to LLM
-      sendMessage(latestTranscript).catch(() => {})
-      latestTranscript = ''
+      sendMessage(transcript).catch(() => {})
+      finalTranscript = ''
+      interimTranscript = ''
     } else if (!retryPending) {
       emit('kittenState', 'idle')
     }
@@ -368,9 +414,12 @@ function startRecording(): Promise<boolean> {
   }
 
   stopTts()
+  chatGeneration += 1
   chatAbort?.abort()
   disposeRecognition()
-  latestTranscript = ''
+  recognitionSession += 1
+  finalTranscript = ''
+  interimTranscript = ''
   gestureActive = true
   restartAttempted = false
   beginRecognition()
@@ -418,12 +467,14 @@ function startServices(): Promise<void> {
 }
 
 function stopServices(): Promise<void> {
+  chatGeneration += 1
   stopTts()
   chatAbort?.abort()
   return Promise.resolve()
 }
 
 function interrupt(): Promise<void> {
+  chatGeneration += 1
   chatAbort?.abort()
   stopTts()
   fetch('/api/interrupt', { method: 'POST' }).catch(() => {})
@@ -432,6 +483,7 @@ function interrupt(): Promise<void> {
 }
 
 async function resetConversation(): Promise<void> {
+  chatGeneration += 1
   chatAbort?.abort()
   stopTts()
   chatHistory.length = 0
@@ -482,7 +534,9 @@ const webApi = {
 
   onServiceStatus: (cb: (s: { ready: boolean }) => void): Unsubscribe => on('serviceStatus', cb),
   onKittenState: (cb: (s: KittenState) => void): Unsubscribe => on('kittenState', cb),
-  onTranscription: (cb: (d: { text: string }) => void): Unsubscribe => on('transcription', cb),
+  onTranscription: (
+    cb: (d: { text: string; interim?: boolean; sessionId?: number }) => void
+  ): Unsubscribe => on('transcription', cb),
   onLlmDelta: (cb: (d: { text: string }) => void): Unsubscribe => on('llmDelta', cb),
   onTtsEvent: (cb: (e: 'start' | 'end') => void): Unsubscribe => on('ttsEvent', cb),
   onDownloadProgress: (cb: (d: DownloadProgress) => void): Unsubscribe =>

@@ -29,7 +29,9 @@ interface Api {
   // Subscriptions
   onServiceStatus(callback: (status: { ready: boolean }) => void): () => void
   onKittenState(callback: (state: KittenState) => void): () => void
-  onTranscription(callback: (data: { text: string }) => void): () => void
+  onTranscription(
+    callback: (data: { text: string; interim?: boolean; sessionId?: number }) => void
+  ): () => void
   onLlmDelta(callback: (data: { text: string }) => void): () => void
   onTtsEvent(callback: (event: 'start' | 'end') => void): () => void
   onDownloadProgress(

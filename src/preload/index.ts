@@ -52,7 +52,9 @@ const api = {
     }
   },
 
-  onTranscription: (callback: (data: { text: string }) => void): (() => void) => {
+  onTranscription: (
+    callback: (data: { text: string; interim?: boolean; sessionId?: number }) => void
+  ): (() => void) => {
     const handler = (_: unknown, data: { text: string }): void => callback(data)
     ipcRenderer.on('transcription', handler)
     return (): void => {

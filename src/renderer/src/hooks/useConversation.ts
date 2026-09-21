@@ -83,9 +83,8 @@ export function useConversation(): UseConversationReturn {
 
     const unsubscribeKittenState = window.api.onKittenState((state) => {
       setKittenState(() => {
-        if (state !== 'listening') {
-          setIsProcessing(false)
-        }
+        setIsRecording(state === 'listening')
+        setIsProcessing(state === 'thinking' || state === 'speaking')
         return state
       })
       if (state === 'thinking') {
@@ -119,11 +118,16 @@ export function useConversation(): UseConversationReturn {
       }
       setMessages((prev) => {
         const last = prev[prev.length - 1]
-        if (last && last.role === 'user' && last.pending) {
+        if (last && last.role === 'user' && (last.pending || data.interim)) {
           const updated = [...prev]
-          updated[updated.length - 1] = { role: 'user', text: data.text }
+          updated[updated.length - 1] = {
+            role: 'user',
+            text: data.text,
+            pending: data.interim
+          }
           return updated
         }
+        if (last?.role === 'user' && last.text.trim() === data.text.trim()) return prev
         return [...prev, { role: 'user', text: data.text }]
       })
     })
@@ -183,7 +187,12 @@ export function useConversation(): UseConversationReturn {
     setIsRecording(false)
     setIsProcessing(true)
     playSendSound()
-    setMessages((prev) => [...prev, { role: 'user', text: '', pending: true }])
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      return last?.role === 'user' && last.pending
+        ? prev
+        : [...prev, { role: 'user', text: '', pending: true }]
+    })
     window.api.stopRecording().catch((err: unknown) => {
       setError(err instanceof Error ? err.message : String(err))
       setIsProcessing(false)
