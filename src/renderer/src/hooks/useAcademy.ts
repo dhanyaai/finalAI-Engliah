@@ -1,0 +1,12 @@
+import {useState} from 'react'
+import {defaultProgress, type LearnerProfile, type Progress} from '@renderer/data/academy'
+const PROFILE='hikid-academy-profile',PROGRESS='hikid-academy-progress'
+function readProfile():LearnerProfile|null{try{const raw=localStorage.getItem(PROFILE);if(!raw)return null;const p=JSON.parse(raw) as Partial<LearnerProfile>;if(typeof p.name!=='string'||!['5–8','9–12','13–15'].includes(p.ageBand??'')||typeof p.level!=='string'||typeof p.dailyGoalMinutes!=='number')return null;return {name:p.name,ageBand:p.ageBand as LearnerProfile['ageBand'],level:p.level,dailyGoalMinutes:p.dailyGoalMinutes}}catch{return null}}
+function readProgress():Progress{try{const raw=localStorage.getItem(PROGRESS);const p=raw?JSON.parse(raw) as Partial<Progress>:{};const scores={...defaultProgress.skillScores,...(p.skillScores&&typeof p.skillScores==='object'?p.skillScores:{})};return {completedLessonIds:Array.isArray(p.completedLessonIds)?p.completedLessonIds.filter((x):x is string=>typeof x==='string'):[],minutes:typeof p.minutes==='number'?p.minutes:defaultProgress.minutes,streak:typeof p.streak==='number'?p.streak:defaultProgress.streak,skillScores:scores}}catch{return {...defaultProgress,skillScores:{...defaultProgress.skillScores}}}}
+function write(key:string,value:unknown):void{try{localStorage.setItem(key,JSON.stringify(value))}catch{}}
+export function useAcademy(){const [profile,setProfile]=useState<LearnerProfile|null>(readProfile);const [progress,setProgress]=useState<Progress>(readProgress)
+ const saveProfile=(p:LearnerProfile)=>{write(PROFILE,p);setProfile(p)}
+ const completeLesson=(id:string,duration=12)=>{let changed=false;setProgress(p=>{if(p.completedLessonIds.includes(id))return p;changed=true;const n={...p,completedLessonIds:[...p.completedLessonIds,id],minutes:p.minutes+duration,streak:Math.max(p.streak,5),skillScores:{...p.skillScores,Speaking:Math.min(100,p.skillScores.Speaking+8),Listening:Math.min(100,p.skillScores.Listening+5)}};write(PROGRESS,n);return n});return changed}
+ const reset=()=>{try{localStorage.removeItem(PROFILE);localStorage.removeItem(PROGRESS)}catch{}setProfile(null);setProgress(readProgress())}
+ return {profile,progress,saveProfile,completeLesson,reset}
+}
