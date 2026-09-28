@@ -734,7 +734,11 @@ async function startServer(): Promise<void> {
   })
 }
 
-void startServer().catch(() => {
-  console.error('[HiKid] Database schema initialization failed; server was not started')
+void startServer().catch((error: unknown) => {
+  // Report a non-sensitive driver code for deployment diagnosis. Never print
+  // the connection string or full error, which may contain credentials.
+  const code = typeof error === 'object' && error !== null && 'code' in error &&
+    typeof error.code === 'string' ? error.code : 'UNKNOWN'
+  console.error(`[HiKid] Database schema initialization failed (${code}); server was not started`)
   process.exitCode = 1
 })
