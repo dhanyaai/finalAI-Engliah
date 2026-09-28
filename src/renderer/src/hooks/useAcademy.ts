@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useMemo,useState} from 'react'
-import {defaultProgress,type ChildRecord,type FamilySettings,type LearnerProfile,type Progress} from '@renderer/data/academy'
+import {defaultProgress,type ChildRecord,type FamilySettings,type LearnerProfile,type Progress,type Lesson,catalogLessons} from '@renderer/data/academy'
 
 const PROFILE='hikid-academy-profile',PROGRESS='hikid-academy-progress',LIMIT='hikid-daily-limit'
 const emptySettings:FamilySettings={dailyLimitMinutes:20,privacySettings:{shareAnalytics:false},hasPin:false}
@@ -16,6 +16,11 @@ export function useAcademy(){
  const saveSettings=async(next:FamilySettings)=>{await api('/api/family/settings',{method:'PUT',body:JSON.stringify(next)});setSettings(next)}
  const setPin=async(pin:string)=>{await api('/api/family/pin',{method:'PUT',body:JSON.stringify({pin})});setSettings(s=>({...s,hasPin:true}))}
  const verifyPin=async(pin:string)=>{await api('/api/family/pin/verify',{method:'POST',body:JSON.stringify({pin})});return true}
- const deleteFamily=async()=>{await api('/api/family',{method:'DELETE'});setChildren([]);setActiveId(null);setSettings(emptySettings)}
- return{children,activeId,setActiveId,profile:active?.profile??null,progress:active?.progress??defaultProgress,settings,loading,error,legacyAvailable:Boolean(legacy)&&children.length===0,createChild,migrate,completeLesson,saveSettings,setPin,verifyPin,deleteFamily}
+  const [library,setLibrary]=useState<Lesson[]>(catalogLessons),[libraryLoading,setLibraryLoading]=useState(false),[libraryError,setLibraryError]=useState<string|null>(null)
+  const loadLibrary=useCallback(async()=>{setLibraryLoading(true);try{const data=await api('/api/admin/curriculum');if(Array.isArray(data))setLibrary(data)}catch(e){setLibraryError(e instanceof Error?e.message:String(e))}finally{setLibraryLoading(false)}},[])
+  const saveLesson=async(lesson:Partial<Lesson>&{id?:string})=>{const saved=await api(lesson.id?`/api/curriculum/lessons/${encodeURIComponent(lesson.id)}`:'/api/curriculum/lessons',{method:lesson.id?'PUT':'POST',body:JSON.stringify(lesson)}) as Lesson;setLibrary(items=>lesson.id?items.map(item=>item.id===saved.id?saved:item):[...items,saved]);return saved}
+  const reviewLesson=async(id:string,review: {educatorApproved?:boolean;ageSafetyApproved?:boolean;notes?:string})=>{const saved=await api(`/api/curriculum/lessons/${encodeURIComponent(id)}/review`,{method:'POST',body:JSON.stringify(review)}) as Lesson;setLibrary(items=>items.map(item=>item.id===saved.id?saved:item));return saved}
+  const publishLesson=async(id:string)=>{const saved=await api(`/api/curriculum/lessons/${encodeURIComponent(id)}/publish`,{method:'POST'}) as Lesson;setLibrary(items=>items.map(item=>item.id===saved.id?saved:item));return saved}
+  const deleteFamily=async()=>{await api('/api/family',{method:'DELETE'});setChildren([]);setActiveId(null);setSettings(emptySettings)}
+  return{children,activeId,setActiveId,profile:active?.profile??null,progress:active?.progress??defaultProgress,settings,loading,error,legacyAvailable:Boolean(legacy)&&children.length===0,createChild,migrate,completeLesson,saveSettings,setPin,verifyPin,deleteFamily,library,libraryLoading,libraryError,loadLibrary,saveLesson,reviewLesson,publishLesson}
 }

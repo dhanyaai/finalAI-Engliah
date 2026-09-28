@@ -31,6 +31,7 @@ COPY --from=builder /app/node_modules ./node_modules
 # Copy the compiled frontend and the server source
 COPY --from=builder /app/src/renderer/dist ./src/renderer/dist
 COPY server ./server
+COPY database ./database
 COPY src/shared ./src/shared
 
 ENV NODE_ENV=production

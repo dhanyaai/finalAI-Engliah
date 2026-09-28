@@ -12,20 +12,18 @@
  */
 
 import express from 'express'
-import cors from 'cors'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { promisify } from 'util'
 import { Pool } from 'pg'
-import { clerkMiddleware, getAuth } from '@clerk/express'
-import { publishableKeyFromHost } from '@clerk/shared/keys'
+import { validateCurriculumInput, canPublishLesson } from '../src/shared/curriculum'
 import {
-  CLERK_PROXY_PATH,
-  clerkProxyMiddleware,
-  getClerkProxyHost
-} from './middlewares/clerkProxyMiddleware'
+  createLocalAuthRouter,
+  createSessionAuthenticator,
+  requireSameOrigin
+} from './localAuth'
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -103,9 +101,6 @@ interface Message {
   content: string
 }
 
-let history: Message[] = []
-let currentAbort: AbortController | null = null
-
 // ─── Sentence splitter (mirrors agent.ts logic) ───────────────────────────────
 
 function extractSentences(text: string): { sentences: string[]; remainder: string } {
@@ -130,51 +125,35 @@ function extractSentences(text: string): { sentences: string[]; remainder: strin
 // ─── Express app ─────────────────────────────────────────────────────────────
 
 const app = express()
-app.use(CLERK_PROXY_PATH, clerkProxyMiddleware())
-app.use(cors({ credentials: true, origin: true }))
+app.set('trust proxy', 1)
 app.use(express.json())
-app.use(
-  clerkMiddleware((req) => ({
-    publishableKey: publishableKeyFromHost(
-      getClerkProxyHost(req) ?? '',
-      process.env.CLERK_PUBLISHABLE_KEY
-    )
-  }))
-)
+app.use('/api', requireSameOrigin)
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+app.use('/api/auth', createLocalAuthRouter(pool))
 const scrypt = promisify(crypto.scrypt)
 const DEFAULT_SCORES = { Speaking: 34, Listening: 51, Reading: 28, Writing: 22, Vocabulary: 63, Grammar: 39 }
-type AuthRequest = express.Request & { userId?: string }
+type AuthRequest = express.Request & { userId?: string; familyId?: string; email?: string }
 const PARENT_GRANT_COOKIE = 'hikid_parent_grant'
 const PARENT_GRANT_SECONDS = 15 * 60
 const PIN_WINDOW_MS = 15 * 60 * 1000
 const PIN_MAX_ATTEMPTS = 5
 const pinAttempts = new Map<string, { count: number; resetAt: number }>()
 
-function requireAuth(req: AuthRequest, res: express.Response, next: express.NextFunction): void {
-  const auth = getAuth(req)
-  const userId = (auth?.sessionClaims?.userId as string | undefined) || auth?.userId
-  if (!userId) {
-    res.status(401).json({ error: 'Unauthorized' })
-    return
-  }
-  req.userId = userId
-  next()
-}
+const requireAuth = createSessionAuthenticator(pool)
 
 async function familyIdFor(userId: string): Promise<string> {
   const result = await pool.query(
-    `INSERT INTO families (clerk_user_id) VALUES ($1)
-     ON CONFLICT (clerk_user_id) DO UPDATE SET updated_at = now()
-     RETURNING id`,
+    'SELECT family_id FROM local_accounts WHERE id = $1',
     [userId]
   )
-  return result.rows[0].id as string
+  const familyId = result.rows[0]?.family_id
+  if (typeof familyId !== 'string') throw new Error('Authenticated family not found')
+  return familyId
 }
 
 function authSecret(): string {
-  const secret = process.env.SESSION_SECRET || process.env.CLERK_SECRET_KEY
+  const secret = process.env.SESSION_SECRET
   if (!secret) throw new Error('SESSION_SECRET is required for parent authorization')
   return secret
 }
@@ -235,6 +214,103 @@ async function requireParentAccess(req: AuthRequest, res: express.Response, next
     next(error)
   }
 }
+
+function curriculumLesson(row: Record<string, any>): Record<string, unknown> {
+  return {
+    id: row.id, courseLevel: row.level, unitId: row.unit_id, ageBands: row.age_bands, title: row.title,
+    objective: row.objective, duration: row.duration, type: row.lesson_type,
+    status: row.review_state === 'published' ? 'Published' : row.review_state,
+    reviewState: row.review_state, video: row.video, subtitles: row.subtitles,
+    transcript: row.transcript, vocabulary: row.vocabulary, activities: row.activities,
+    assessment: row.assessment,
+    review: { educatorApproved: row.educator_approved, ageSafetyApproved: row.age_safety_approved,
+      reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, notes: row.review_notes },
+    createdAt: row.created_at, updatedAt: row.updated_at
+  }
+}
+
+function cleanCurriculum(body: Record<string, unknown>, id?: string): Record<string, unknown> {
+  const title = typeof body.title === 'string' ? body.title.trim().slice(0, 160) : ''
+  const objective = typeof body.objective === 'string' ? body.objective.trim().slice(0, 500) : ''
+  const level = typeof body.courseLevel === 'string' ? body.courseLevel : body.level
+  const unitId = typeof body.unitId === 'string' ? body.unitId.slice(0, 40) : ''
+  const ageBands = Array.isArray(body.ageBands) ? body.ageBands.filter((band): band is string => typeof band === 'string') : []
+  const video = body.video as Record<string, unknown> | undefined
+  const validation = validateCurriculumInput({title, objective, level, unitId, ageBands, video})
+  if (validation) throw new Error(validation)
+  return { id, title, objective, level, unitId, ageBands: JSON.stringify(ageBands), duration: Math.min(180, Math.max(1, Number(body.duration) || 10)),
+    lessonType: typeof body.type === 'string' ? body.type.slice(0, 80) : 'Structured practice',
+    video: JSON.stringify(video), subtitles: JSON.stringify(Array.isArray(body.subtitles) ? body.subtitles : []),
+    transcript: typeof body.transcript === 'string' ? body.transcript.slice(0, 20000) : '',
+    vocabulary: JSON.stringify(Array.isArray(body.vocabulary) ? body.vocabulary.slice(0, 30) : []),
+    activities: JSON.stringify(Array.isArray(body.activities) ? body.activities : []),
+    assessment: body.assessment ? JSON.stringify(body.assessment) : null }
+}
+
+app.get('/api/curriculum', requireAuth, async (_req: AuthRequest, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM curriculum_lessons WHERE review_state = $1 ORDER BY level, unit_id, id', ['published'])
+    res.json(result.rows.map(curriculumLesson))
+  } catch (error) {
+    console.error('[curriculum] load failed', error)
+    res.status(500).json({ error: 'Could not load curriculum' })
+  }
+})
+
+app.get('/api/admin/curriculum', requireAuth, requireParentAccess, async (_req: AuthRequest, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM curriculum_lessons ORDER BY updated_at DESC, level, unit_id, id')
+    res.json(result.rows.map(curriculumLesson))
+  } catch { res.status(500).json({ error: 'Could not load curriculum studio' }) }
+})
+
+app.post('/api/curriculum/lessons', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  try {
+    const input = cleanCurriculum(req.body as Record<string, unknown>)
+    const id = `lesson-${crypto.randomUUID()}`
+    const result = await pool.query(
+      `INSERT INTO curriculum_lessons (id,level,unit_id,age_bands,title,objective,duration,lesson_type,video,subtitles,transcript,vocabulary,activities,assessment)
+       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13::jsonb,$14::jsonb) RETURNING *`,
+      [id,input.level,input.unitId,input.ageBands,input.title,input.objective,input.duration,input.lessonType,input.video,input.subtitles,input.transcript,input.vocabulary,input.activities,input.assessment])
+    res.status(201).json(curriculumLesson(result.rows[0]))
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : 'Could not create lesson' }) }
+})
+
+app.put('/api/curriculum/lessons/:lessonId', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  try {
+    const input = cleanCurriculum(req.body as Record<string, unknown>, req.params.lessonId.toString())
+    const result = await pool.query(
+      `UPDATE curriculum_lessons SET level=$2,unit_id=$3,age_bands=$4::jsonb,title=$5,objective=$6,duration=$7,lesson_type=$8,video=$9::jsonb,subtitles=$10::jsonb,transcript=$11,vocabulary=$12::jsonb,activities=$13::jsonb,assessment=$14::jsonb,review_state=CASE WHEN review_state='published' THEN 'draft' ELSE review_state END,updated_at=now()
+       WHERE id=$1 RETURNING *`,
+      [input.id,input.level,input.unitId,input.ageBands,input.title,input.objective,input.duration,input.lessonType,input.video,input.subtitles,input.transcript,input.vocabulary,input.activities,input.assessment])
+    if (!result.rowCount) { res.status(404).json({ error: 'Lesson not found' }); return }
+    res.json(curriculumLesson(result.rows[0]))
+  } catch (error) { res.status(400).json({ error: error instanceof Error ? error.message : 'Could not update lesson' }) }
+})
+
+app.post('/api/curriculum/lessons/:lessonId/review', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  try {
+    const educator = typeof req.body?.educatorApproved === 'boolean' ? req.body.educatorApproved : undefined
+    const safety = typeof req.body?.ageSafetyApproved === 'boolean' ? req.body.ageSafetyApproved : undefined
+    const result = await pool.query(
+      `UPDATE curriculum_lessons SET educator_approved=COALESCE($2,educator_approved), age_safety_approved=COALESCE($3,age_safety_approved),
+       review_notes=COALESCE($4,review_notes), reviewed_by=$5, reviewed_at=now(),
+       review_state=CASE WHEN COALESCE($2,educator_approved) AND COALESCE($3,age_safety_approved) THEN 'approved' ELSE 'in_review' END, updated_at=now()
+       WHERE id=$1 RETURNING *`, [req.params.lessonId, educator, safety, typeof req.body?.notes === 'string' ? req.body.notes.slice(0,2000) : null, req.userId])
+    if (!result.rowCount) { res.status(404).json({ error: 'Lesson not found' }); return }
+    res.json(curriculumLesson(result.rows[0]))
+  } catch { res.status(500).json({ error: 'Could not save review' }) }
+})
+
+app.post('/api/curriculum/lessons/:lessonId/publish', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
+  try {
+    const check = await pool.query('SELECT educator_approved, age_safety_approved FROM curriculum_lessons WHERE id=$1', [req.params.lessonId])
+    if (!check.rowCount || !canPublishLesson(check.rows[0])) { res.status(409).json({ error: 'Educator and age-safety approval are both required before publishing' }); return }
+    const result = await pool.query(`UPDATE curriculum_lessons SET review_state='published',updated_at=now() WHERE id=$1 RETURNING *`, [req.params.lessonId])
+    if (!result.rowCount) { res.status(409).json({ error: 'Educator and age-safety approval are both required before publishing' }); return }
+    res.json(curriculumLesson(result.rows[0]))
+  } catch { res.status(500).json({ error: 'Could not publish lesson' }) }
+})
 
 function cleanProfile(body: Record<string, unknown>) {
   const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : ''
@@ -439,18 +515,26 @@ app.post('/api/family/pin/verify', requireAuth, async (req: AuthRequest, res) =>
 })
 
 app.delete('/api/family', requireAuth, requireParentAccess, async (req: AuthRequest, res) => {
-  await pool.query('DELETE FROM families WHERE clerk_user_id=$1', [req.userId])
+  // Family deletion cascades through its local account and sessions, ensuring
+  // that the deleted account cannot remain signed in.
+  const familyId = await familyIdFor(req.userId!)
+  await pool.query('DELETE FROM families WHERE id=$1', [familyId])
   res.setHeader('Set-Cookie', `${PARENT_GRANT_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`)
   res.status(204).end()
 })
 
-// GET /api/config
-app.get('/api/config', (_req, res) => {
-  res.json(loadConfig())
+// Never send the server's LLM credential to a browser.
+app.get('/api/config', requireAuth, (_req, res) => {
+  res.json({ ...loadConfig(), apiKey: '' })
 })
 
-// POST /api/config
-app.post('/api/config', (req, res) => {
+// Shared LLM configuration is not a family setting. Only permit local
+// configuration during development; production is controlled by server env.
+app.post('/api/config', requireAuth, (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    res.status(403).json({ error: 'Server configuration cannot be changed here' })
+    return
+  }
   const body = req.body as Partial<AppConfig>
   const current = loadConfig()
   const updated: AppConfig = {
@@ -472,7 +556,7 @@ app.post('/api/config', (req, res) => {
         : current.modelName
   }
   saveConfig(updated)
-  res.json(updated)
+  res.json({ ...updated, apiKey: '' })
 })
 
 // GET /api/deps — web mode never needs native binaries
@@ -481,37 +565,25 @@ app.get('/api/deps', (_req, res) => {
 })
 
 // POST /api/reset
-app.post('/api/reset', (_req, res) => {
-  history = []
-  currentAbort?.abort()
-  currentAbort = null
+app.post('/api/reset', requireAuth, (_req, res) => {
+  // The browser owns its conversation history; nothing shared to reset.
   res.json({ ok: true })
 })
 
 // POST /api/interrupt
-app.post('/api/interrupt', (_req, res) => {
-  currentAbort?.abort()
-  currentAbort = null
+app.post('/api/interrupt', requireAuth, (_req, res) => {
+  // The browser interrupts its own streaming request by aborting fetch.
   res.json({ ok: true })
 })
 
 // POST /api/chat — SSE streaming
-//
-// Two supported request contracts:
-//  A) { messages: [{role, text}, ...] } — stateless; the client owns the full
-//     history (this is what the web client sends, same as the Vite dev plugin)
-//  B) { message: "..." } — legacy single message; server keeps history
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', requireAuth, async (req, res) => {
   const body = req.body as {
-    message?: unknown
     messages?: Array<{ role?: string; text?: unknown; content?: unknown }>
   }
 
-  const stateless = Array.isArray(body.messages)
-  let llmHistory: Message[]
-
-  if (stateless) {
-    llmHistory = (body.messages ?? [])
+  const llmHistory: Message[] = Array.isArray(body?.messages)
+    ? body.messages
       .map((m) => {
         const raw =
           typeof m.text === 'string' ? m.text : typeof m.content === 'string' ? m.content : ''
@@ -521,19 +593,10 @@ app.post('/api/chat', async (req, res) => {
         }
       })
       .filter((m) => m.content)
-    if (llmHistory.length === 0) {
-      res.status(400).json({ error: 'messages array contains no valid entries' })
-      return
-    }
-  } else {
-    // Reject empty/null messages before they corrupt the history
-    const trimmedMessage = typeof body.message === 'string' ? body.message.trim() : ''
-    if (!trimmedMessage) {
-      res.status(400).json({ error: 'message must be a non-empty string' })
-      return
-    }
-    history.push({ role: 'user', content: trimmedMessage })
-    llmHistory = history.filter((m) => typeof m.content === 'string' && m.content.trim())
+    : []
+  if (llmHistory.length === 0) {
+    res.status(400).json({ error: 'messages array contains no valid entries' })
+    return
   }
 
   res.setHeader('Content-Type', 'text/event-stream')
@@ -548,17 +611,9 @@ app.post('/api/chat', async (req, res) => {
   const cfg = loadConfig()
   const systemPrompt = cfg.systemPrompt.replace(/\{\{AI_NAME\}\}/g, cfg.aiName)
 
-  // Per-request abort controller. When the client disconnects (its interrupt
-  // aborts the fetch), cancel the upstream LLM stream for THIS request only.
-  // The global currentAbort is only used in legacy mode so /api/interrupt and
-  // /api/reset can't kill other users' in-flight streams on a shared server.
+  // Each browser owns its history and aborts only its own streaming fetch.
   const abort = new AbortController()
   res.on('close', () => abort.abort())
-  if (!stateless) {
-    currentAbort = abort
-  }
-
-  let fullResponse = ''
 
   try {
     const llmRes = await fetch(`${cfg.baseUrl}/chat/completions`, {
@@ -579,14 +634,12 @@ app.post('/api/chat', async (req, res) => {
       const errText = await llmRes.text().catch(() => llmRes.statusText)
       send({ type: 'error', message: `LLM error ${llmRes.status}: ${errText}` })
       res.end()
-      if (!stateless) history.pop() // remove the user message we just added
       return
     }
 
     if (!llmRes.body) {
       send({ type: 'error', message: 'LLM returned no response body' })
       res.end()
-      if (!stateless) history.pop()
       return
     }
 
@@ -615,7 +668,6 @@ app.post('/api/chat', async (req, res) => {
           }
           const delta = parsed.choices?.[0]?.delta?.content
           if (delta) {
-            fullResponse += delta
             sentenceBuffer += delta
             send({ type: 'delta', text: delta })
 
@@ -637,9 +689,6 @@ app.post('/api/chat', async (req, res) => {
       send({ type: 'sentence', text: sentenceBuffer.trim() })
     }
 
-    if (!stateless && fullResponse) {
-      history.push({ role: 'assistant', content: fullResponse })
-    }
     send({ type: 'done' })
     res.end()
   } catch (err: unknown) {
@@ -649,7 +698,6 @@ app.post('/api/chat', async (req, res) => {
       const message = err instanceof Error ? err.message : String(err)
       console.error('[chat] Error:', message)
       send({ type: 'error', message })
-      if (!stateless) history.pop() // don't store failed user messages
     }
     res.end()
   }
@@ -673,10 +721,20 @@ if (process.env.NODE_ENV === 'production') {
 
 // DigitalOcean App Platform injects PORT; fall back to 3000 for local dev.
 const PORT = parseInt(process.env.PORT || process.env.API_PORT || '3000', 10)
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[HiKid] Server running on http://0.0.0.0:${PORT}`)
-  console.log(`[HiKid] LLM endpoint: ${loadConfig().baseUrl}`)
-  if (process.env.NODE_ENV === 'production') {
-    console.log('[HiKid] Serving built frontend from src/renderer/dist')
-  }
+async function startServer(): Promise<void> {
+  // The external production database may not have run the Replit post-merge
+  // hook. Apply the idempotent schema before accepting requests.
+  await pool.query(fs.readFileSync(path.resolve(process.cwd(), 'database', 'schema.sql'), 'utf8'))
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[HiKid] Server running on http://0.0.0.0:${PORT}`)
+    console.log(`[HiKid] LLM endpoint: ${loadConfig().baseUrl}`)
+    if (process.env.NODE_ENV === 'production') {
+      console.log('[HiKid] Serving built frontend from src/renderer/dist')
+    }
+  })
+}
+
+void startServer().catch(() => {
+  console.error('[HiKid] Database schema initialization failed; server was not started')
+  process.exitCode = 1
 })

@@ -6,13 +6,8 @@
     "build:web": "vite build --config vite.web.config.ts"
   },
   "dependencies": {
-    "@clerk/express": "2.1.69",
-    "@clerk/react": "6.16.1",
-    "@clerk/shared": "4.33.0",
-    "cors": "2.8.6",
     "dotenv": "17.4.2",
     "express": "5.2.1",
-    "http-proxy-middleware": "4.2.0",
     "pg": "8.23.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
