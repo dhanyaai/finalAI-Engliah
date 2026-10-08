@@ -129,12 +129,22 @@ app.set('trust proxy', 1)
 app.use(express.json())
 app.use('/api', requireSameOrigin)
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // DigitalOcean managed PostgreSQL uses its own CA. Supplying that public
-  // certificate keeps TLS verification enabled instead of disabling it.
-  ...(process.env.DATABASE_CA_CERT ? { ssl: { ca: process.env.DATABASE_CA_CERT } } : {})
-})
+function databasePoolOptions(): ConstructorParameters<typeof Pool>[0] {
+  const connectionString = process.env.DATABASE_URL
+  const ca = process.env.DATABASE_CA_CERT
+  if (!ca || !connectionString) return { connectionString }
+
+  // pg-connection-string lets sslmode in the URL override a separately
+  // supplied ssl object. Remove URL SSL query options so the verified CA
+  // remains authoritative rather than silently reverting to system roots.
+  const url = new URL(connectionString)
+  for (const option of ['sslmode', 'ssl', 'sslcert', 'sslkey', 'sslrootcert']) {
+    url.searchParams.delete(option)
+  }
+  return { connectionString: url.toString(), ssl: { ca } }
+}
+
+const pool = new Pool(databasePoolOptions())
 app.use('/api/auth', createLocalAuthRouter(pool))
 const scrypt = promisify(crypto.scrypt)
 const DEFAULT_SCORES = { Speaking: 34, Listening: 51, Reading: 28, Writing: 22, Vocabulary: 63, Grammar: 39 }
