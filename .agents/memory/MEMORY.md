@@ -1,3 +1,4 @@
 - [Web chat dual backends](web-chat-dual-backends.md) — /api/chat served by Vite plugin in dev but Express in prod; contract changes must land in both or prod breaks invisibly.
 - [Web voice pipeline quirks](web-voice-pipeline-quirks.md) — Chrome aborts mic sessions started during TTS wind-down; dispose + retry-once per gesture, never ignore 'aborted' silently.
 - [Managed Clerk hosting](managed-clerk-hosting.md) — Replit-managed Clerk rejects non-Replit production hosts; use Replit Publish or migrate to an external Clerk tenant.
+- [External database hosting](external-database-hosting.md) — Replit development Postgres is internal-only; external hosts need a public production connection or their own database.

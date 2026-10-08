@@ -129,7 +129,12 @@ app.set('trust proxy', 1)
 app.use(express.json())
 app.use('/api', requireSameOrigin)
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // DigitalOcean managed PostgreSQL uses its own CA. Supplying that public
+  // certificate keeps TLS verification enabled instead of disabling it.
+  ...(process.env.DATABASE_CA_CERT ? { ssl: { ca: process.env.DATABASE_CA_CERT } } : {})
+})
 app.use('/api/auth', createLocalAuthRouter(pool))
 const scrypt = promisify(crypto.scrypt)
 const DEFAULT_SCORES = { Speaking: 34, Listening: 51, Reading: 28, Writing: 22, Vocabulary: 63, Grammar: 39 }

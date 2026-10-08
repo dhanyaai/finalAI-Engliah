@@ -38,8 +38,30 @@ services:
         scope: RUN_TIME
         value: production
 
+      # Attach the existing managed PostgreSQL cluster without copying its
+      # credentials into this file.
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${hikid-db.DATABASE_URL}
+
+      # Paste the public CA certificate from the cluster's /ca API response.
+      - key: DATABASE_CA_CERT
+        scope: RUN_TIME
+
+      # Set a strong random value as a secret in the App Platform dashboard.
+      - key: SESSION_SECRET
+        scope: RUN_TIME
+        type: SECRET
+
       # Override the LLM endpoint if you want something other than OpenAI
       # - key: LLM_BASE_URL
       #   value: https://api.openai.com/v1
       # - key: LLM_MODEL
       #   value: gpt-4o-mini
+
+databases:
+  - name: hikid-db
+    engine: PG
+    production: true
+    cluster_name: hikid-production
+    version: "16"
